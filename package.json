@@ -1,0 +1,14 @@
+{
+  "name": "stock-badshah-yahoo-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend proxy so screener.html (running in a user's browser) can get Yahoo Finance historical OHLCV data without hitting the browser CORS block. See ../DEPLOYMENT-GUIDE.md.",
+  "main": "yahoo-proxy-server.js",
+  "scripts": {
+    "start": "node yahoo-proxy-server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}
