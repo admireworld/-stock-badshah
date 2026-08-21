@@ -54,7 +54,7 @@
  *     many were dropped, never silently).
  *
  *   GET /api/fundamentals?symbol=RELIANCE.NS
- *     New in this drop. Delegates to server/screener-fundamentals-provider.js
+ *     New in this drop. Delegates to ../screener-fundamentals-provider.js
  *     (Screener.in scraper — see that file's header for the ToS caveat that
  *     is carried forward, unresolved, by this route). symbol accepts the
  *     ".NS"/".BO" suffix or the bare NSE symbol; the provider strips it.
@@ -104,7 +104,7 @@
 const http = require("http");
 const { URL } = require("url");
 const YahooProvider = require("../providers/yahoo-provider.js");
-const ScreenerFundamentalsProvider = require("./screener-fundamentals-provider.js");
+const ScreenerFundamentalsProvider = require("../screener-fundamentals-provider.js");
 
 const PORT = process.env.PORT || 8787;
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 5 * 60 * 1000; // 5 minutes
