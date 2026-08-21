@@ -1,382 +1,350 @@
 /* ============================================================================
- * Stock Badshah — Minimal Backend Proxy for Yahoo Historical Data
+ * Stock Badshah — Screener.in Fundamentals Provider
  * ----------------------------------------------------------------------------
- * WHY THIS FILE EXISTS (see YAHOO-HISTORICAL-DATA-TEST-REPORT.md for full
- * detail): a browser can't call Yahoo's chart endpoint directly — Yahoo does
- * not send Access-Control-Allow-Origin for arbitrary origins, so
- * screener.html's own fetch() would be blocked by the browser's CORS policy
- * before the request even reaches Yahoo. A backend-to-backend request has no
- * such restriction (CORS is a browser rule, not a server one) — so the fix
- * is: browser -> our own backend (same-origin) -> Yahoo (server-to-server).
+ * WHY THIS FILE EXISTS
+ *   Neither yahoo-provider.js nor browser-data-provider.js supply
+ *   fundamentals — both getFundamentals() implementations are documented
+ *   no-op stubs that resolve to `{}` (Yahoo's Indian-fundamentals coverage
+ *   is unreliable, see DATA-INTEGRATION-DESIGN.md §4). That leaves
+ *   month-strategy-engine.js's Fundamental (30 pts) and Valuation (20 pts)
+ *   categories — and positional-strategy-engine.js's Fundamental Quality
+ *   (35 pts) and part of Valuation & Risk (15 pts) — scoring everything as
+ *   0/missing forever unless something supplies pe/pb/roe/roce/growth/D-E.
  *
- * STATUS: LOCAL ONLY. This process is not deployed, not exposed to the
- * public internet, and not wired into screener.html in this drop. It is
- * meant to be run on your own machine with `node server/yahoo-proxy-server.js`
- * and hit from curl/Postman/browser at http://localhost while you verify it
- * works. It does NOT touch firebase-config.js, any strategy engine,
- * indicator-math.js, or any HTML page.
+ *   DATA-INTEGRATION-DESIGN.md §4 already flagged Screener.in as "the best
+ *   free source of exactly the fundamentals this app needs" with one
+ *   explicit caveat: "No official public API; accessing it programmatically
+ *   means scraping, which has its own terms-of-service and reliability
+ *   considerations to evaluate before use." That caveat is not resolved by
+ *   this file — it is carried forward here, unchanged, because only the
+ *   person deploying this can decide whether scraping Screener.in fits
+ *   their use (read their current ToS/robots.txt before turning this on).
  *
- * No live trading / order-placement functionality of any kind lives here —
- * this process only ever reads historical daily OHLCV bars and returns
- * them as JSON. It never fabricates data: a failed upstream fetch is
- * returned as a clear HTTP error with the real error message, never
- * papered over with placeholder numbers.
- *
- * ----------------------------------------------------------------------------
- * ENDPOINTS
- * ----------------------------------------------------------------------------
- *
- *   GET /api/historical?symbol=RELIANCE.NS&range=1y
- *     The primary endpoint.
- *       - symbol   required. Validated against YahooProvider.isValidSymbol()
- *                  (letters/digits/dot/hyphen/ampersand, 1-20 chars). An
- *                  invalid or missing symbol never reaches Yahoo — 400 is
- *                  returned immediately.
- *       - range    optional, defaults to "1y". Any Yahoo-style range string:
- *                  1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max.
- *     Response 200 (normalized JSON):
- *       {
- *         "symbol": "RELIANCE.NS",
- *         "source": "Yahoo Finance historical data",
- *         "range": "1y",
- *         "barCount": 248,
- *         "droppedCount": 0,
- *         "cached": false,
- *         "fetchedAt": "2026-08-20T10:15:00.000Z",
- *         "dailyBars": [
- *           { "date": "2025-08-21", "open": 1402.1, "high": 1415.0,
- *             "low": 1398.5, "close": 1409.75, "volume": 6123456 },
- *           ...
- *         ]
- *       }
- *     No bar is ever invented — dailyBars is exactly what Yahoo returned,
- *     minus any bar with an incomplete OHLCV field (droppedCount says how
- *     many were dropped, never silently).
- *
- *   GET /api/fundamentals?symbol=RELIANCE.NS
- *     New in this drop. Delegates to server/screener-fundamentals-provider.js
- *     (Screener.in scraper — see that file's header for the ToS caveat that
- *     is carried forward, unresolved, by this route). symbol accepts the
- *     ".NS"/".BO" suffix or the bare NSE symbol; the provider strips it.
- *     Response 200 is the flat fundamentals object that provider returns
- *     (pe, pb, industryPe, roe, roce, salesGrowthYoY, profitGrowthYoY,
- *     qoqProfitGrowth, debtToEquity, bookValue, eps, dividendYield,
- *     fundamentalsAsOf, source, sourceUrl) plus "cached": true/false — same
- *     never-fabricate rule as /api/historical: a field the parser can't
- *     find is null, never guessed, and a total failure (Screener.in
- *     down/blocked/layout changed) is a 502 with the real error message,
- *     never a fake fundamentals object.
- *
- *   GET /api/market-data/historical/:symbol?days=250
- *     Kept from the previous drop, UNCHANGED. Enforces the >=250-trading-
- *     day / 200-DMA minimum via YahooProvider.getHistoricalDaily(). No
- *     caching was added to this legacy route so its behavior stays
- *     identical to before.
- *
- * ----------------------------------------------------------------------------
- * CACHING (new in this drop)
- * ----------------------------------------------------------------------------
- * A small in-memory Map caches successful /api/historical responses per
- * (symbol, range) pair for CACHE_TTL_MS (default 5 minutes — configurable
- * via the optional CACHE_TTL_MS env var). This only avoids *redundant*
- * repeated calls to Yahoo within that window; it never returns stale data
- * as if it were fresh — the response always says "cached": true/false and
- * carries the original "fetchedAt" timestamp so the caller can tell.
- * The cache is purely in-process memory: it is empty on every server
- * restart, holds no files, and is never treated as a source of truth if a
- * fresh fetch is requested (there's no "force refresh" needed because a
- * failed cache entry is never stored — only genuine successful Yahoo
- * responses are cached).
- *
- * ----------------------------------------------------------------------------
- * RUNNING IT LOCALLY
- * ----------------------------------------------------------------------------
- *   node server/yahoo-proxy-server.js
- *   curl "http://localhost:8787/api/historical?symbol=RELIANCE.NS&range=1y"
- *
- * No environment variables are required. Optional:
- *   PORT           - port to listen on (default 8787)
- *   CACHE_TTL_MS    - cache lifetime in ms (default 300000 = 5 minutes)
+ * SCOPE — read before wiring anywhere:
+ *   - FUNDAMENTALS ONLY: pe, pb, roe, roce, salesGrowthYoY,
+ *     profitGrowthYoY, qoqProfitGrowth, debtToEquity, bookValue, eps,
+ *     dividendYield, industryPe (from the peer-comparison table when
+ *     present), fundamentalsAsOf. No price/quote/OHLCV data — that stays
+ *     Yahoo's job (yahoo-provider.js / browser-data-provider.js).
+ *   - This file is Node/server-side ONLY, exactly like yahoo-provider.js —
+ *     it is not loaded by screener.html, index.html, or any other browser
+ *     page. Screener.in does not send permissive CORS headers either, so
+ *     the same "backend proxy, not direct browser call" architecture
+ *     described in YAHOO-HISTORICAL-DATA-TEST-REPORT.md §4 applies here
+ *     too. Wiring this into a browser-safe provider means adding a
+ *     fundamentals route to a backend proxy (e.g. server/yahoo-proxy-server.js)
+ *     — that file was not part of this drop, so it is not touched here;
+ *     see FUNDAMENTALS-DATA-TEST-REPORT.md for the next-step note.
+ *   - Does NOT modify market-data-service.js, indicator-math.js, any
+ *     strategy engine, or any HTML page. It's a standalone DataProvider-
+ *     shaped module (same `getFundamentals(symbol)` contract documented in
+ *     market-data-service.js §3) that has to be explicitly registered
+ *     (or composed with YahooProvider) before it does anything.
+ *   - UNVERIFIED AGAINST THE LIVE SITE. This sandbox's network egress
+ *     allowlist blocks www.screener.in (same host_not_allowed reason
+ *     documented in YAHOO-HISTORICAL-DATA-TEST-REPORT.md §3a for Yahoo) —
+ *     so the selectors below could not be exercised against a real
+ *     response here. They're written against Screener.in's long-standing,
+ *     widely-documented "top ratios" list markup
+ *     (`<ul id="top-ratios"><li><span class="name">…</span><span class="number">…</span></li>`),
+ *     which is the pattern used by essentially every public Screener.in
+ *     scraping writeup — but that markup is exactly the kind of thing a
+ *     site can change without notice, and this has NOT been confirmed
+ *     against a live page. Treat every parsed field as "best-effort,
+ *     needs verification on real network access" until someone runs
+ *     test-screener-fundamentals.js on a machine that can reach
+ *     www.screener.in and checks the output against the site by eye.
+ *   - Never fabricates a field. Any ratio not found in the page (selector
+ *     miss, site layout change, login-walled data, etc.) is left `null`,
+ *     exactly like yahoo-provider.js drops incomplete OHLCV bars instead
+ *     of guessing them.
  * ==========================================================================*/
 
 "use strict";
 
-// ============================================================================
-// TEMPORARY DIAGNOSTIC BLOCK — remove once the MODULE_NOT_FOUND issue is
-// resolved. Logs exactly what files Render actually sees in this file's own
-// directory (and one level up) before we try to require anything, so we can
-// see the real cause in Render's logs instead of guessing.
-// ============================================================================
-const fs = require("fs");
-const path = require("path");
-try {
-  console.log("[DIAGNOSTIC] __dirname =", __dirname);
-  console.log("[DIAGNOSTIC] files in __dirname:", fs.readdirSync(__dirname));
-  const parentDir = path.join(__dirname, "..");
-  console.log("[DIAGNOSTIC] parent dir =", parentDir);
-  console.log("[DIAGNOSTIC] files in parent dir:", fs.readdirSync(parentDir));
-} catch (diagErr) {
-  console.log("[DIAGNOSTIC] failed to list directories:", diagErr.message);
+const SCREENER_BASE = "https://www.screener.in/company";
+
+// Screener.in is known to serve a lighter/blocked page to obvious bot
+// traffic. Real browser UA, same rationale as yahoo-provider.js's
+// REQUEST_HEADERS — not an evasion trick, just what a normal browser sends.
+const REQUEST_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml",
+};
+
+// Same conservative symbol validator as yahoo-provider.js. Screener.in
+// URLs use the bare NSE symbol (e.g. "RELIANCE", not "RELIANCE.NS") —
+// stripping a trailing ".NS"/".BO" is done in getFundamentals() below, not
+// here, so this stays a pure format check.
+const SYMBOL_REGEX = /^[A-Za-z0-9&-]{1,20}$/;
+
+function isValidSymbol(symbol) {
+  return typeof symbol === "string" && SYMBOL_REGEX.test(symbol.trim());
 }
-// ============================================================================
 
-const http = require("http");
-const { URL } = require("url");
-const YahooProvider = require("../providers/yahoo-provider.js");
+function toScreenerSymbol(symbol) {
+  // "RELIANCE.NS" / "RELIANCE.BO" -> "RELIANCE". Screener.in itself
+  // decides NSE vs BSE per-company; it is not selectable via this suffix.
+  return (symbol || "").trim().replace(/\.(NS|BO)$/i, "");
+}
 
-let ScreenerFundamentalsProvider;
-try {
-  ScreenerFundamentalsProvider = require("./screener-fundamentals-provider.js");
-  console.log("[DIAGNOSTIC] screener-fundamentals-provider.js loaded OK");
-} catch (reqErr) {
-  console.log("[DIAGNOSTIC] Failed to require screener-fundamentals-provider.js:", reqErr.message);
-  // Fallback stub so the server can still start and /api/historical keeps
-  // working while we diagnose — /api/fundamentals will just 502 until fixed.
-  ScreenerFundamentalsProvider = {
-    async getFundamentals(symbol) {
+function isFiniteNumber(n) {
+  return typeof n === "number" && Number.isFinite(n);
+}
+
+/**
+ * Screener.in renders numbers like "23.4 %", "1,23,456", "-8.2", "1,234.56
+ * Cr.". Strips everything but digits/decimal/minus and parses. Returns
+ * null (never 0, never a guess) if nothing numeric survives.
+ */
+function parseNumber(rawText) {
+  if (typeof rawText !== "string") return null;
+  const cleaned = rawText.replace(/,/g, "").match(/-?\d+(\.\d+)?/);
+  if (!cleaned) return null;
+  const n = parseFloat(cleaned[0]);
+  return isFiniteNumber(n) ? n : null;
+}
+
+/**
+ * Pulls every { name, number } pair out of Screener.in's "top ratios" list.
+ * ASSUMPTION (see file header): markup is
+ *   <ul id="top-ratios"> ... <li ...><span class="name">X</span> ...
+ *     <span class="number">Y</span> ... </li> ... </ul>
+ * Deliberately tolerant of attributes/whitespace between tags, but does
+ * NOT try to handle a fundamentally different markup — if Screener.in has
+ * changed this, every field below comes back null rather than wrong.
+ */
+function extractTopRatios(html) {
+  const ratios = {};
+
+  const listMatch = html.match(/<ul[^>]*id=["']top-ratios["'][^>]*>([\s\S]*?)<\/ul>/i);
+  if (!listMatch) return ratios;
+
+  const listHtml = listMatch[1];
+  const liRegex = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+  let li;
+  while ((li = liRegex.exec(listHtml)) !== null) {
+    const liHtml = li[1];
+    const nameMatch = liHtml.match(/<span[^>]*class=["'][^"']*\bname\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i);
+    const numberMatch = liHtml.match(/<span[^>]*class=["'][^"']*\bnumber\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i);
+    if (!nameMatch || !numberMatch) continue;
+
+    const name = nameMatch[1].replace(/<[^>]+>/g, "").trim().toLowerCase();
+    const numberText = numberMatch[1].replace(/<[^>]+>/g, "").trim();
+    if (name) ratios[name] = numberText;
+  }
+
+  return ratios;
+}
+
+/**
+ * Looks up a ratio by trying several label variants Screener.in is known
+ * to use interchangeably (e.g. "ROE" vs "Return on equity"), returns the
+ * first match's parsed number, or null if none of the variants are found.
+ */
+function pickRatio(ratios, labelVariants) {
+  const keys = Object.keys(ratios);
+  // Exact-match pass first, across ALL variants, before any substring
+  // fallback — otherwise a substring match (e.g. "book value" matching
+  // inside "price to book value") can steal a different field's ratio.
+  // Only once no variant has an exact match do we fall back to substring
+  // matching, which is looser but needed because Screener.in's exact
+  // label wording drifts (e.g. "ROE" vs "Return on equity").
+  for (const label of labelVariants) {
+    const key = keys.find((k) => k === label);
+    if (key) {
+      const n = parseNumber(ratios[key]);
+      if (n !== null) return n;
+    }
+  }
+  for (const label of labelVariants) {
+    const key = keys.find((k) => k.includes(label));
+    if (key) {
+      const n = parseNumber(ratios[key]);
+      if (n !== null) return n;
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort industry PE: Screener.in shows a peer-comparison table with
+ * an "Industry PE" figure in some page variants, not all. If it's not
+ * present in the "top ratios" list itself, this returns null rather than
+ * scraping the (much less stable) peer table — a wrong industry PE feeds
+ * directly into month/positional valuation scoring, so "null, flagged
+ * missing" is safer than a shaky guess here.
+ */
+function extractIndustryPe(ratios) {
+  return pickRatio(ratios, ["industry pe"]);
+}
+
+async function fetchCompanyHtml(screenerSymbol) {
+  // "/consolidated/" first — most large-caps report consolidated
+  // financials and Screener.in prefers that view when it exists; falls
+  // back to the standalone page (some companies, e.g. those without
+  // subsidiaries, only have the non-consolidated URL).
+  const urls = [
+    `${SCREENER_BASE}/${encodeURIComponent(screenerSymbol)}/consolidated/`,
+    `${SCREENER_BASE}/${encodeURIComponent(screenerSymbol)}/`,
+  ];
+
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, { headers: REQUEST_HEADERS });
+      if (response.status === 404) {
+        lastErr = new Error(`[ScreenerFundamentalsProvider] 404 at ${url}`);
+        continue; // try the next URL variant
+      }
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => "");
+        throw new Error(
+          `[ScreenerFundamentalsProvider] Screener.in responded HTTP ${response.status} ${response.statusText} ` +
+            `for "${screenerSymbol}" (${url})${bodyText ? ` — body: ${bodyText.slice(0, 300)}` : ""}`
+        );
+      }
+      return { html: await response.text(), url };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  throw (
+    lastErr ||
+    new Error(`[ScreenerFundamentalsProvider] No reachable Screener.in page found for "${screenerSymbol}".`)
+  );
+}
+
+const ScreenerFundamentalsProvider = {
+  id: "screener-in-fundamentals",
+
+  isValidSymbol,
+  toScreenerSymbol, // exported for tests / callers that want the mapped symbol
+
+  /**
+   * Out of scope for this provider — it supplies fundamentals only, never
+   * a quote. Throws (rather than returning nulls) so a caller mistakenly
+   * treating this as a full DataProvider fails loudly instead of silently
+   * producing an all-null quote block.
+   */
+  async getQuote(symbol) {
+    throw new Error(
+      `[ScreenerFundamentalsProvider] This provider supplies fundamentals only — no getQuote() for "${symbol}". ` +
+        "Use yahoo-provider.js / browser-data-provider.js for quotes and historical bars."
+    );
+  },
+
+  /** Same reasoning as getQuote() above. */
+  async getHistoricalDaily(symbol) {
+    throw new Error(
+      `[ScreenerFundamentalsProvider] This provider supplies fundamentals only — no getHistoricalDaily() for "${symbol}".`
+    );
+  },
+
+  /**
+   * Fetches and parses Screener.in's public company page for `symbol`
+   * (accepts "RELIANCE" or "RELIANCE.NS"/"RELIANCE.BO" — the exchange
+   * suffix is stripped). Returns a Partial<StockDataSnapshot> matching
+   * exactly the fundamentals fields market-data-service.js's
+   * StockDataSnapshot documents. Any ratio the parser can't confidently
+   * find is left `null` — never guessed, never defaulted to 0.
+   */
+  async getFundamentals(symbol) {
+    if (!isValidSymbol(toScreenerSymbol(symbol))) {
+      throw new Error(`[ScreenerFundamentalsProvider] Invalid symbol format: "${symbol}"`);
+    }
+
+    const screenerSymbol = toScreenerSymbol(symbol);
+    const { html, url } = await fetchCompanyHtml(screenerSymbol);
+    const ratios = extractTopRatios(html);
+
+    if (Object.keys(ratios).length === 0) {
       throw new Error(
-        "[DIAGNOSTIC] screener-fundamentals-provider.js failed to load at startup: " + reqErr.message
+        `[ScreenerFundamentalsProvider] Fetched ${url} but found no parseable "top ratios" data — ` +
+          "either Screener.in changed its page markup (see ASSUMPTION note at the top of this file) " +
+          `or "${screenerSymbol}" has no fundamentals page. Not fabricating a fundamentals object.`
       );
+    }
+
+    return {
+      pe: pickRatio(ratios, ["stock p/e", "price to earning", "p/e"]),
+      pb: pickRatio(ratios, ["price to book", "p/b"]),
+      industryPe: extractIndustryPe(ratios),
+      roe: pickRatio(ratios, ["roe", "return on equity"]),
+      roce: pickRatio(ratios, ["roce", "return on capital employed"]),
+      salesGrowthYoY: pickRatio(ratios, ["sales growth"]),
+      profitGrowthYoY: pickRatio(ratios, ["profit growth", "profit var"]),
+      // Screener.in's "top ratios" list does not carry a QoQ figure —
+      // that lives in the quarterly-results table, which this provider
+      // does not parse (table layout is far less stable than the ratios
+      // list; see file header). Left null and flagged here rather than
+      // scraped shakily — month/positional engines already treat a
+      // missing qoqProfitGrowth as "scorer awards 0, note attached", not
+      // a crash.
+      qoqProfitGrowth: null,
+      debtToEquity: pickRatio(ratios, ["debt to equity", "debt/eq"]),
+      bookValue: pickRatio(ratios, ["book value"]),
+      eps: pickRatio(ratios, ["eps"]),
+      dividendYield: pickRatio(ratios, ["dividend yield"]),
+      fundamentalsAsOf: new Date().toISOString(), // page-fetch time; Screener.in itself doesn't stamp a per-ratio "as of" in this list
+      source: "screener-in-fundamentals",
+      sourceUrl: url,
+    };
+  },
+};
+
+/**
+ * Composes a full DataProvider (matching market-data-service.js §3's
+ * interface: getQuote + getHistoricalDaily + getFundamentals) out of two
+ * single-purpose providers — e.g. YahooProvider for quote/historical and
+ * ScreenerFundamentalsProvider for fundamentals. Neither source provider
+ * needs to change; this is pure composition, same "swap the vendor, not
+ * the interface" philosophy as everything else in this project.
+ *
+ * Does NOT register itself anywhere and does NOT change
+ * market-data-service.js — a caller still does
+ * `MarketDataService.registerProvider(createCombinedProvider({...}))`
+ * explicitly, exactly like YahooProvider is registered today in
+ * test-yahoo-historical-data.js.
+ *
+ * If fundamentalsProvider.getFundamentals() throws (e.g. Screener.in
+ * blocked/down/layout changed), that error propagates as-is — it is NOT
+ * swallowed into an empty `{}` here, unlike yahoo-provider.js's own
+ * intentional no-op stub. Rationale: when fundamentals are the whole
+ * point of registering this combined provider, a silent `{}` would look
+ * identical to "this company has no fundamentals," which is misleading.
+ * Callers who'd rather degrade gracefully can catch it themselves around
+ * fetchSnapshot() / getFundamentals().
+ */
+function createCombinedProvider(options) {
+  const opts = options || {};
+  const technicalProvider = opts.technicalProvider;
+  const fundamentalsProvider = opts.fundamentalsProvider || ScreenerFundamentalsProvider;
+
+  if (!technicalProvider || typeof technicalProvider.getQuote !== "function") {
+    throw new Error(
+      "[ScreenerFundamentalsProvider] createCombinedProvider() needs a { technicalProvider } implementing " +
+        "getQuote()/getHistoricalDaily() — e.g. YahooProvider or BrowserDataProvider.create({...})."
+    );
+  }
+
+  return {
+    id: `${technicalProvider.id}+${fundamentalsProvider.id}`,
+    async getQuote(symbol) {
+      return technicalProvider.getQuote(symbol);
+    },
+    async getHistoricalDaily(symbol, days) {
+      return technicalProvider.getHistoricalDaily(symbol, days);
+    },
+    async getFundamentals(symbol) {
+      return fundamentalsProvider.getFundamentals(symbol);
     },
   };
 }
 
-const PORT = process.env.PORT || 8787;
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 5 * 60 * 1000; // 5 minutes
-// Fundamentals move much slower than daily bars (quarterly-lag data), so a
-// longer TTL than the historical cache is safe here — same reasoning
-// market-data-service.js already applies client-side
-// (CONFIG.cache.fundamentalsTtlMs = 24h). Separate Map + separate env var
-// on purpose: this cache must never be confused with historicalCache's
-// entries, since the two hold differently-shaped bodies.
-const FUNDAMENTALS_CACHE_TTL_MS =
-  Number(process.env.FUNDAMENTALS_CACHE_TTL_MS) || 24 * 60 * 60 * 1000; // 24 hours
-
-// Same-origin-with-the-frontend deployment needs no CORS headers at all.
-// This header is included only so the proxy is also usable during local
-// dev when the frontend is served from a different port — remove it in a
-// same-origin production deployment. It does not open this server to the
-// public internet by itself; that still requires deliberately deploying
-// and exposing this process, which is explicitly NOT done in this drop.
-const DEV_CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-};
-
-// ----------------------------------------------------------------------------
-// In-memory cache: key "SYMBOL|range" -> { body, expiresAt }
-// Only ever populated with genuine successful Yahoo responses.
-// ----------------------------------------------------------------------------
-const historicalCache = new Map();
-
-function cacheKey(symbol, range) {
-  return `${symbol.toUpperCase()}|${range}`;
+if (typeof module === "object" && module.exports) {
+  module.exports = ScreenerFundamentalsProvider;
+  module.exports.createCombinedProvider = createCombinedProvider;
 }
-
-function getCached(symbol, range) {
-  const entry = historicalCache.get(cacheKey(symbol, range));
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    historicalCache.delete(cacheKey(symbol, range));
-    return null;
-  }
-  return entry.body;
-}
-
-function setCached(symbol, range, body) {
-  historicalCache.set(cacheKey(symbol, range), {
-    body,
-    expiresAt: Date.now() + CACHE_TTL_MS,
-  });
-}
-
-// ----------------------------------------------------------------------------
-// In-memory cache for /api/fundamentals: key "SYMBOL" -> { body, expiresAt }
-// Only ever populated with a genuine successful Screener.in parse — a
-// failed fetch (see handleFundamentals below) is never cached, same rule
-// as historicalCache above.
-// ----------------------------------------------------------------------------
-const fundamentalsCache = new Map();
-
-function getCachedFundamentals(symbol) {
-  const entry = fundamentalsCache.get(symbol.toUpperCase());
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    fundamentalsCache.delete(symbol.toUpperCase());
-    return null;
-  }
-  return entry.body;
-}
-
-function setCachedFundamentals(symbol, body) {
-  fundamentalsCache.set(symbol.toUpperCase(), {
-    body,
-    expiresAt: Date.now() + FUNDAMENTALS_CACHE_TTL_MS,
-  });
-}
-
-function sendJson(res, statusCode, body) {
-  res.writeHead(statusCode, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(body));
-}
-
-/**
- * GET /api/historical?symbol=RELIANCE.NS&range=1y
- */
-async function handleHistorical(url, res) {
-  const rawSymbol = (url.searchParams.get("symbol") || "").trim();
-  const rawRange = (url.searchParams.get("range") || "1y").trim();
-
-  if (!rawSymbol) {
-    sendJson(res, 400, {
-      error: "invalid_request",
-      message: "Missing required query param: symbol (e.g. ?symbol=RELIANCE.NS)",
-    });
-    return;
-  }
-  if (!YahooProvider.isValidSymbol(rawSymbol)) {
-    sendJson(res, 400, {
-      error: "invalid_symbol",
-      message: `"${rawSymbol}" is not a valid symbol. Expected letters/digits/dot/hyphen/ampersand only, e.g. RELIANCE.NS.`,
-    });
-    return;
-  }
-  const symbol = rawSymbol.toUpperCase();
-
-  const cached = getCached(symbol, rawRange);
-  if (cached) {
-    sendJson(res, 200, { ...cached, cached: true });
-    return;
-  }
-
-  try {
-    const { bars, range: usedRange, droppedCount } =
-      await YahooProvider.getHistoricalDailyByRange(symbol, rawRange);
-
-    const body = {
-      symbol,
-      source: "Yahoo Finance historical data",
-      range: usedRange,
-      barCount: bars.length,
-      droppedCount,
-      fetchedAt: new Date().toISOString(),
-      dailyBars: bars,
-    };
-
-    setCached(symbol, rawRange, body);
-    sendJson(res, 200, { ...body, cached: false });
-  } catch (err) {
-    console.error(`[yahoo-proxy-server] /api/historical "${symbol}" (range=${rawRange}) failed:`, err.message);
-    sendJson(res, 502, {
-      error: "upstream_fetch_failed",
-      message: err.message,
-    });
-  }
-}
-
-async function handleFundamentals(url, res) {
-  const rawSymbol = (url.searchParams.get("symbol") || "").trim();
-
-  if (!rawSymbol) {
-    sendJson(res, 400, {
-      error: "invalid_request",
-      message: "Missing required query param: symbol (e.g. ?symbol=RELIANCE.NS)",
-    });
-    return;
-  }
-
-  const cached = getCachedFundamentals(rawSymbol);
-  if (cached) {
-    sendJson(res, 200, { ...cached, cached: true });
-    return;
-  }
-
-  try {
-    const fundamentals = await ScreenerFundamentalsProvider.getFundamentals(rawSymbol);
-    setCachedFundamentals(rawSymbol, fundamentals);
-    sendJson(res, 200, { ...fundamentals, cached: false });
-  } catch (err) {
-    console.error(`[yahoo-proxy-server] /api/fundamentals "${rawSymbol}" failed:`, err.message);
-    sendJson(res, 502, {
-      error: "upstream_fetch_failed",
-      message: err.message,
-    });
-  }
-}
-
-async function handleMarketDataHistorical(symbol, url, res) {
-  const days = Number(url.searchParams.get("days")) || 250;
-
-  try {
-    const dailyBars = await YahooProvider.getHistoricalDaily(symbol, days);
-    sendJson(res, 200, {
-      symbol,
-      source: "Yahoo Finance historical data",
-      barCount: dailyBars.length,
-      dailyBars,
-    });
-  } catch (err) {
-    console.error(`[yahoo-proxy-server] /api/market-data/historical "${symbol}" failed:`, err.message);
-    sendJson(res, 502, { error: "upstream_fetch_failed", message: err.message });
-  }
-}
-
-const server = http.createServer(async (req, res) => {
-  let url;
-  try {
-    url = new URL(req.url, `http://${req.headers.host}`);
-  } catch (e) {
-    sendJson(res, 400, { error: "invalid_request", message: "Malformed request URL." });
-    return;
-  }
-
-  Object.entries(DEV_CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  if (req.method !== "GET") {
-    sendJson(res, 405, { error: "method_not_allowed", message: "Only GET is supported on this endpoint." });
-    return;
-  }
-
-  try {
-    if (url.pathname === "/api/historical") {
-      await handleHistorical(url, res);
-      return;
-    }
-
-    if (url.pathname === "/api/fundamentals") {
-      await handleFundamentals(url, res);
-      return;
-    }
-
-    const legacyMatch = url.pathname.match(/^\/api\/market-data\/historical\/([^/]+)$/);
-    if (legacyMatch) {
-      await handleMarketDataHistorical(decodeURIComponent(legacyMatch[1]), url, res);
-      return;
-    }
-
-    sendJson(res, 404, {
-      error: "not_found",
-      message: "Route not found. Try /api/historical?symbol=SYMBOL&range=1y",
-    });
-  } catch (unexpectedErr) {
-    console.error("[yahoo-proxy-server] Unexpected server error:", unexpectedErr);
-    sendJson(res, 500, { error: "internal_error", message: "Unexpected server error." });
-  }
-});
-
-if (require.main === module) {
-  server.listen(PORT, () => {
-    console.log(`[yahoo-proxy-server] listening on http://localhost:${PORT}`);
-    console.log(`  Try: http://localhost:${PORT}/api/historical?symbol=RELIANCE.NS&range=1y`);
-    console.log(`  Try: http://localhost:${PORT}/api/fundamentals?symbol=RELIANCE.NS`);
-    console.log(`  Historical cache TTL: ${CACHE_TTL_MS}ms, Fundamentals cache TTL: ${FUNDAMENTALS_CACHE_TTL_MS}ms`);
-  });
-}
-
-module.exports = server;
