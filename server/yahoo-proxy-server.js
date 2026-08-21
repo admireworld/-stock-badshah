@@ -1,4 +1,3 @@
-
 /* ============================================================================
  * Stock Badshah — Minimal Backend Proxy for Yahoo Historical Data
  * ----------------------------------------------------------------------------
@@ -102,10 +101,45 @@
 
 "use strict";
 
+// ============================================================================
+// TEMPORARY DIAGNOSTIC BLOCK — remove once the MODULE_NOT_FOUND issue is
+// resolved. Logs exactly what files Render actually sees in this file's own
+// directory (and one level up) before we try to require anything, so we can
+// see the real cause in Render's logs instead of guessing.
+// ============================================================================
+const fs = require("fs");
+const path = require("path");
+try {
+  console.log("[DIAGNOSTIC] __dirname =", __dirname);
+  console.log("[DIAGNOSTIC] files in __dirname:", fs.readdirSync(__dirname));
+  const parentDir = path.join(__dirname, "..");
+  console.log("[DIAGNOSTIC] parent dir =", parentDir);
+  console.log("[DIAGNOSTIC] files in parent dir:", fs.readdirSync(parentDir));
+} catch (diagErr) {
+  console.log("[DIAGNOSTIC] failed to list directories:", diagErr.message);
+}
+// ============================================================================
+
 const http = require("http");
 const { URL } = require("url");
 const YahooProvider = require("../providers/yahoo-provider.js");
-const ScreenerFundamentalsProvider = require("./screener-fundamentals-provider.js");
+
+let ScreenerFundamentalsProvider;
+try {
+  ScreenerFundamentalsProvider = require("./screener-fundamentals-provider.js");
+  console.log("[DIAGNOSTIC] screener-fundamentals-provider.js loaded OK");
+} catch (reqErr) {
+  console.log("[DIAGNOSTIC] Failed to require screener-fundamentals-provider.js:", reqErr.message);
+  // Fallback stub so the server can still start and /api/historical keeps
+  // working while we diagnose — /api/fundamentals will just 502 until fixed.
+  ScreenerFundamentalsProvider = {
+    async getFundamentals(symbol) {
+      throw new Error(
+        "[DIAGNOSTIC] screener-fundamentals-provider.js failed to load at startup: " + reqErr.message
+      );
+    },
+  };
+}
 
 const PORT = process.env.PORT || 8787;
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 5 * 60 * 1000; // 5 minutes
@@ -193,7 +227,6 @@ async function handleHistorical(url, res) {
   const rawSymbol = (url.searchParams.get("symbol") || "").trim();
   const rawRange = (url.searchParams.get("range") || "1y").trim();
 
-  // --- 1. Validate the symbol ---------------------------------------------
   if (!rawSymbol) {
     sendJson(res, 400, {
       error: "invalid_request",
@@ -210,14 +243,12 @@ async function handleHistorical(url, res) {
   }
   const symbol = rawSymbol.toUpperCase();
 
-  // --- 2. Serve from cache if we have a fresh entry -----------------------
   const cached = getCached(symbol, rawRange);
   if (cached) {
     sendJson(res, 200, { ...cached, cached: true });
     return;
   }
 
-  // --- 3. Fetch server-to-server from Yahoo, normalize, cache, respond ---
   try {
     const { bars, range: usedRange, droppedCount } =
       await YahooProvider.getHistoricalDailyByRange(symbol, rawRange);
@@ -235,7 +266,6 @@ async function handleHistorical(url, res) {
     setCached(symbol, rawRange, body);
     sendJson(res, 200, { ...body, cached: false });
   } catch (err) {
-    // --- 4. Handle Yahoo/network errors safely, never fake data ----------
     console.error(`[yahoo-proxy-server] /api/historical "${symbol}" (range=${rawRange}) failed:`, err.message);
     sendJson(res, 502, {
       error: "upstream_fetch_failed",
@@ -244,22 +274,6 @@ async function handleHistorical(url, res) {
   }
 }
 
-/**
- * GET /api/fundamentals?symbol=RELIANCE.NS
- * New in this drop. Delegates entirely to
- * ScreenerFundamentalsProvider.getFundamentals() (server/screener-
- * fundamentals-provider.js) — this route does no parsing itself, only
- * validation, caching, and error-shaping, mirroring handleHistorical()
- * above so browser-data-provider.js's existing fetchJson() call (it
- * already hits this exact path — see providers/browser-data-provider.js)
- * gets the response shape it expects.
- *
- * On failure (Screener.in down/blocked/layout changed, or ToS/network
- * issues) this returns a normal 502 with { error, message } — it never
- * fabricates a fundamentals object. browser-data-provider.js already
- * catches that and degrades to `{}` so a fundamentals outage never breaks
- * price/technical data.
- */
 async function handleFundamentals(url, res) {
   const rawSymbol = (url.searchParams.get("symbol") || "").trim();
 
@@ -290,10 +304,6 @@ async function handleFundamentals(url, res) {
   }
 }
 
-/**
- * GET /api/market-data/historical/:symbol?days=250
- * Kept from the previous drop, unchanged behavior (no caching added here).
- */
 async function handleMarketDataHistorical(symbol, url, res) {
   const days = Number(url.searchParams.get("days")) || 250;
 
@@ -355,9 +365,6 @@ const server = http.createServer(async (req, res) => {
       message: "Route not found. Try /api/historical?symbol=SYMBOL&range=1y",
     });
   } catch (unexpectedErr) {
-    // Last-resort safety net — should not normally trigger, since both
-    // handlers already catch their own errors. Never leaks a stack trace
-    // to the client, never fabricates a body.
     console.error("[yahoo-proxy-server] Unexpected server error:", unexpectedErr);
     sendJson(res, 500, { error: "internal_error", message: "Unexpected server error." });
   }
