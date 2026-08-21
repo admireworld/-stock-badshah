@@ -90,9 +90,14 @@
 const http = require("http");
 const { URL } = require("url");
 const YahooProvider = require("../providers/yahoo-provider.js");
+const ScreenerFundamentalsProvider = require("./screener-fundamentals-provider.js");
 
 const PORT = process.env.PORT || 8787;
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS) || 5 * 60 * 1000; // 5 minutes
+// Fundamentals change far less often than daily bars (quarterly-lag data),
+// so this gets its own, much longer cache TTL — default 24 hours.
+const FUNDAMENTALS_CACHE_TTL_MS =
+  Number(process.env.FUNDAMENTALS_CACHE_TTL_MS) || 24 * 60 * 60 * 1000;
 
 // Same-origin-with-the-frontend deployment needs no CORS headers at all.
 // This header is included only so the proxy is also usable during local
@@ -129,6 +134,29 @@ function setCached(symbol, range, body) {
   historicalCache.set(cacheKey(symbol, range), {
     body,
     expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+}
+
+// ----------------------------------------------------------------------------
+// Separate in-memory cache for fundamentals: key "SYMBOL" -> { body, expiresAt }
+// Only ever populated with genuine successful Screener.in responses.
+// ----------------------------------------------------------------------------
+const fundamentalsCache = new Map();
+
+function getFundamentalsCached(symbol) {
+  const entry = fundamentalsCache.get(symbol.toUpperCase());
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    fundamentalsCache.delete(symbol.toUpperCase());
+    return null;
+  }
+  return entry.body;
+}
+
+function setFundamentalsCached(symbol, body) {
+  fundamentalsCache.set(symbol.toUpperCase(), {
+    body,
+    expiresAt: Date.now() + FUNDAMENTALS_CACHE_TTL_MS,
   });
 }
 
@@ -216,6 +244,54 @@ async function handleMarketDataHistorical(symbol, url, res) {
   }
 }
 
+/**
+ * GET /api/fundamentals?symbol=RELIANCE.NS
+ * Scrapes Screener.in via screener-fundamentals-provider.js for pe/pb/roe/
+ * roce/growth/debt-to-equity/etc. Never fabricates a field — any ratio the
+ * parser can't confidently find comes back null (see that file's header
+ * for the full caveats around scraping an unofficial source).
+ */
+async function handleFundamentals(url, res) {
+  const rawSymbol = (url.searchParams.get("symbol") || "").trim();
+
+  if (!rawSymbol) {
+    sendJson(res, 400, {
+      error: "invalid_request",
+      message: "Missing required query param: symbol (e.g. ?symbol=RELIANCE.NS)",
+    });
+    return;
+  }
+
+  const screenerSymbol = ScreenerFundamentalsProvider.toScreenerSymbol(rawSymbol);
+  if (!ScreenerFundamentalsProvider.isValidSymbol(screenerSymbol)) {
+    sendJson(res, 400, {
+      error: "invalid_symbol",
+      message: `"${rawSymbol}" is not a valid symbol.`,
+    });
+    return;
+  }
+  const symbol = rawSymbol.toUpperCase();
+
+  const cached = getFundamentalsCached(symbol);
+  if (cached) {
+    sendJson(res, 200, { ...cached, cached: true });
+    return;
+  }
+
+  try {
+    const fundamentals = await ScreenerFundamentalsProvider.getFundamentals(symbol);
+    const body = { symbol, ...fundamentals };
+    setFundamentalsCached(symbol, body);
+    sendJson(res, 200, { ...body, cached: false });
+  } catch (err) {
+    console.error(`[yahoo-proxy-server] /api/fundamentals "${symbol}" failed:`, err.message);
+    sendJson(res, 502, {
+      error: "upstream_fetch_failed",
+      message: err.message,
+    });
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   let url;
   try {
@@ -244,6 +320,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/api/fundamentals") {
+      await handleFundamentals(url, res);
+      return;
+    }
+
     const legacyMatch = url.pathname.match(/^\/api\/market-data\/historical\/([^/]+)$/);
     if (legacyMatch) {
       await handleMarketDataHistorical(decodeURIComponent(legacyMatch[1]), url, res);
@@ -252,7 +333,7 @@ const server = http.createServer(async (req, res) => {
 
     sendJson(res, 404, {
       error: "not_found",
-      message: "Route not found. Try /api/historical?symbol=SYMBOL&range=1y",
+      message: "Route not found. Try /api/historical?symbol=SYMBOL&range=1y or /api/fundamentals?symbol=SYMBOL",
     });
   } catch (unexpectedErr) {
     // Last-resort safety net — should not normally trigger, since both
@@ -267,7 +348,8 @@ if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`[yahoo-proxy-server] listening on http://localhost:${PORT}`);
     console.log(`  Try: http://localhost:${PORT}/api/historical?symbol=RELIANCE.NS&range=1y`);
-    console.log(`  Cache TTL: ${CACHE_TTL_MS}ms`);
+    console.log(`  Try: http://localhost:${PORT}/api/fundamentals?symbol=RELIANCE.NS`);
+    console.log(`  Cache TTL: ${CACHE_TTL_MS}ms (historical) / ${FUNDAMENTALS_CACHE_TTL_MS}ms (fundamentals)`);
   });
 }
 
