@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Watchlist — Stock Badshah</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<!-- Firebase (Authentication only) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-auth-compat.js" crossorigin="anonymous"></script>
+<script src="firebase-config.js"></script>
+
+<!--
+  ============================================================================
+  STATUS: Same convention as week/month/positional-strategy.html.
+  - NO market-data API is connected here either. Scanning the watchlist
+    calls MarketDataService.fetchSnapshot() once PER SYMBOL, sequentially,
+    the exact same call the single-symbol search boxes make on the other
+    pages. With NullDataProvider active (the default), every call rejects,
+    so the result table always ends on the "Market data not connected"
+    empty state — nothing here is sample/hardcoded/fabricated.
+  - WHY THIS STAYS FREE-PLAN-SAFE:
+      1. The watchlist itself (add/remove/reorder) lives in the browser's
+         localStorage, namespaced per signed-in uid. Zero Firestore reads
+         or writes — Firebase Auth is still required (same guard as every
+         other page) but nothing here touches a paid Firebase quota.
+      2. Scanning never fires all 50 requests at once. It walks the list
+         one symbol at a time with a configurable delay between calls
+         (see "Scan Delay" field below) so that whichever market-data
+         provider eventually gets registered — most free tiers cap
+         requests/minute — doesn't get hammered. Default delay is
+         conservative (1500ms ≈ 40 req/min ceiling); raise it if your
+         provider's free tier is stricter.
+      3. The watchlist is hard-capped at MAX_WATCHLIST stocks (50) so a
+         scan can never silently grow into something that blows through
+         a daily free-tier quota.
+  - This file does NOT modify index.html, login.html, screener.html,
+    week/month/positional-strategy.html, firebase-config.js, the engine
+    files, indicator-math.js, or market-data-service.js. It only
+    *references* them, same as every other page in this drop.
+  ============================================================================
+-->
+
+<script src="market-data-service.js"></script>
+<script src="providers/browser-data-provider.js"></script>
+<script src="market-data-config.js"></script>
+<script src="indicator-math.js"></script>
+<script src="week-strategy-engine.js"></script>
+<script src="month-strategy-engine.js"></script>
+<script src="positional-strategy-engine.js"></script>
+
+<style>
+  :root{
+    --bg: #0A0F1C;
+    --surface: #111A2C;
+    --surface-2: #16213A;
+    --border: #223252;
+    --gold: #D4A94A;
+    --gold-soft: rgba(212,169,74,0.14);
+    --text: #F3EFE6;
+    --text-muted: #8C96AE;
+    --up: #3FAE6A;
+    --danger: #E0645A;
+  }
+
+  *{ margin:0; padding:0; box-sizing:border-box; }
+
+  html,body{
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body{
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background-image:
+      radial-gradient(circle at 15% 0%, rgba(212,169,74,0.07), transparent 45%),
+      radial-gradient(circle at 100% 20%, rgba(212,169,74,0.05), transparent 40%);
+  }
+
+  a{ color: inherit; text-decoration: none; }
+  ul{ list-style: none; }
+
+  header{
+    border-bottom: 1px solid var(--border);
+    background: rgba(10,15,28,0.85);
+    backdrop-filter: blur(8px);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .header-inner{
+    max-width: 1280px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 28px;
+    gap: 16px;
+  }
+
+  .brand{ display: flex; align-items: center; gap: 12px; }
+  .crown-mark{ width: 34px; height: 34px; flex-shrink: 0; }
+  .brand-text{ display: flex; flex-direction: column; line-height: 1; }
+
+  .brand-name{
+    font-family: 'Playfair Display', serif;
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: 0.3px;
+    color: var(--text);
+  }
+
+  .brand-name span{ color: var(--gold); }
+
+  .brand-tag{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+
+  .user-box{ display: flex; align-items: center; gap: 14px; }
+
+  .user-avatar{
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: var(--gold-soft);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--gold);
+    flex-shrink: 0;
+  }
+
+  .user-info{ display: flex; flex-direction: column; line-height: 1.3; }
+
+  .user-email{
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .user-role{
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .logout-btn{
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 7px;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .logout-btn:hover{ border-color: var(--danger); color: var(--danger); }
+
+  .layout{
+    flex: 1;
+    max-width: 1280px;
+    width: 100%;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 24px;
+    padding: 24px 28px 48px;
+  }
+
+  .sidebar{ display: flex; flex-direction: column; gap: 4px; }
+
+  .sidebar-title{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 0 12px;
+    margin-bottom: 8px;
+  }
+
+  .nav-link{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .nav-link:hover{ background: var(--surface); color: var(--text); border-color: var(--border); }
+
+  .nav-link.active{
+    background: var(--gold-soft);
+    color: var(--gold);
+    border-color: rgba(212,169,74,0.35);
+  }
+
+  .nav-link svg{ width: 16px; height: 16px; flex-shrink: 0; }
+
+  .nav-divider{ height: 1px; background: var(--border); margin: 12px 4px; }
+
+  .nav-link.danger{ color: var(--danger); }
+  .nav-link.danger:hover{ background: rgba(224,101,90,0.1); border-color: rgba(224,101,90,0.3); }
+
+  main{ display: flex; flex-direction: column; gap: 28px; min-width: 0; }
+
+  .page-heading{
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .page-title{ font-family: 'Playfair Display', serif; font-weight: 700; font-size: 24px; }
+  .page-title em{ font-style: normal; color: var(--gold); }
+  .page-sub{ font-size: 12.5px; color: var(--text-muted); }
+
+  section.panel{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .panel-head{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .panel-head-left{ display: flex; align-items: center; gap: 10px; }
+  .panel-title{ font-family: 'Playfair Display', serif; font-weight: 700; font-size: 17px; }
+  .panel-title-icon{ width: 18px; height: 18px; color: var(--gold); flex-shrink: 0; }
+
+  .badge{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+
+  .badge.status-unknown{ color: var(--text-muted); border-color: var(--border); }
+  .badge.status-closed{ color: var(--danger); border-color: rgba(224,101,90,0.35); background: rgba(224,101,90,0.08); }
+  .badge.status-open{ color: var(--up); border-color: rgba(63,174,106,0.35); background: rgba(63,174,106,0.08); }
+  .badge.status-full{ color: var(--danger); border-color: rgba(224,101,90,0.35); }
+
+  .table-wrap{ overflow-x: auto; }
+
+  table.strategy-table{ width: 100%; border-collapse: collapse; min-width: 760px; }
+
+  table.strategy-table thead th{
+    text-align: left;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  table.strategy-table tbody td{
+    padding: 14px 16px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .empty-state{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 10px;
+    padding: 44px 24px;
+    color: var(--text-muted);
+  }
+
+  .empty-state svg{ width: 40px; height: 40px; color: var(--gold); opacity: 0.55; }
+  .empty-state-title{ font-family: 'Playfair Display', serif; font-weight: 700; font-size: 16px; color: var(--text); }
+  .empty-state-sub{ font-size: 12.5px; max-width: 440px; line-height: 1.6; }
+
+  .empty-state-cols{ margin-top: 6px; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+
+  .empty-state-cols span{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 3px 9px;
+  }
+
+  footer{
+    border-top: 1px solid var(--border);
+    padding: 22px 28px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  footer span{ color: var(--gold); }
+
+  @media (max-width: 880px){
+    .layout{ grid-template-columns: 1fr; padding: 18px 16px 40px; }
+    .sidebar{ flex-direction: row; overflow-x: auto; gap: 8px; padding-bottom: 4px; }
+    .sidebar-title{ display: none; }
+    .nav-link{ white-space: nowrap; }
+    .nav-divider{ display: none; }
+  }
+
+  @media (max-width: 460px){
+    .header-inner{ padding: 14px 16px; }
+    .user-email{ max-width: 110px; }
+  }
+
+  button{ font-family: inherit; }
+
+  .search-panel-body{ padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+
+  .search-row{ display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: end; }
+
+  .field-group{ display: flex; flex-direction: column; gap: 7px; }
+
+  .field-group label{
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .field-group input[type="text"],
+  .field-group input[type="number"],
+  .field-group select{
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 14px;
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .field-group input:disabled, .field-group select:disabled{ opacity: 0.6; cursor: not-allowed; }
+  .field-group input::placeholder{ color: #5C6684; }
+
+  .field-group input:focus, .field-group select:focus{
+    border-color: var(--gold);
+    box-shadow: 0 0 0 3px var(--gold-soft);
+  }
+
+  .field-hint{ font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+
+  .search-btn{
+    background: var(--gold);
+    color: #17110A;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: filter 0.15s ease, transform 0.05s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .search-btn svg{ width: 16px; height: 16px; }
+  .search-btn:hover{ filter: brightness(1.08); }
+  .search-btn:active{ transform: translateY(1px); }
+  .search-btn:disabled{ opacity: 0.5; cursor: not-allowed; }
+
+  .btn-row{ display: flex; gap: 10px; flex-wrap: wrap; }
+
+  .btn-secondary{
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .btn-secondary:hover{ border-color: var(--gold); color: var(--text); }
+  .btn-secondary.danger:hover{ border-color: var(--danger); color: var(--danger); }
+  .btn-secondary:disabled{ opacity: 0.5; cursor: not-allowed; }
+
+  .btn-primary{
+    background: var(--gold);
+    color: #17110A;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: filter 0.15s ease;
+  }
+
+  .btn-primary:hover{ filter: brightness(1.08); }
+  .btn-primary:disabled{ opacity: 0.5; cursor: not-allowed; filter: none; }
+
+  /* ---------- WATCHLIST ---------- */
+  .watchlist-body{ padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .watchlist-add-row{ display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; }
+
+  .watchlist-counter{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .watchlist-counter strong{ color: var(--gold); }
+
+  .watchlist-list{
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    max-height: 460px;
+    overflow-y: auto;
+  }
+
+  .watchlist-item{
+    background: var(--surface);
+    padding: 14px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .watchlist-item-left{ display: flex; align-items: center; gap: 12px; }
+  .watchlist-symbol{ font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 14px; color: var(--text); }
+  .watchlist-meta{ font-size: 11.5px; color: var(--text-muted); }
+
+  .watchlist-price-na{ display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+  .watchlist-price-na svg{ width: 14px; height: 14px; opacity: 0.7; }
+
+  .watchlist-remove-btn{
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 7px;
+    padding: 7px 12px;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .watchlist-remove-btn:hover{ border-color: var(--danger); color: var(--danger); }
+
+  /* ---------- SCAN CONTROLS ---------- */
+  .scan-controls-row{
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 14px;
+    align-items: end;
+  }
+
+  .scan-progress-wrap{ display: flex; flex-direction: column; gap: 8px; }
+
+  .scan-progress-label{
+    display: flex;
+    justify-content: space-between;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .scan-progress-bar{
+    height: 8px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    overflow: hidden;
+  }
+
+  .scan-progress-fill{
+    height: 100%;
+    width: 0%;
+    background: var(--gold);
+    transition: width 0.2s ease;
+  }
+
+  .toast{
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(0);
+    background: var(--surface-2);
+    border: 1px solid var(--gold);
+    color: var(--text);
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 13px;
+    z-index: 50;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  .toast.show{ opacity: 1; transform: translateX(-50%) translateY(-6px); }
+
+  @media (max-width: 880px){
+    .search-row{ grid-template-columns: 1fr; }
+    .search-btn{ justify-content: center; }
+    .watchlist-add-row{ grid-template-columns: 1fr; }
+    .scan-controls-row{ grid-template-columns: 1fr; }
+  }
+</style>
+
+</head>
+<body>
+
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <svg class="crown-mark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 34 L6 16 L15 24 L24 10 L33 24 L42 16 L40 34 Z" stroke="#D4A94A" stroke-width="2.2" stroke-linejoin="round" fill="rgba(212,169,74,0.08)"/>
+          <circle cx="24" cy="10" r="2" fill="#D4A94A"/>
+          <circle cx="6" cy="16" r="2" fill="#D4A94A"/>
+          <circle cx="42" cy="16" r="2" fill="#D4A94A"/>
+          <line x1="8" y1="38" x2="40" y2="38" stroke="#D4A94A" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <div class="brand-text">
+          <div class="brand-name">Stock <span>Badshah</span></div>
+          <div class="brand-tag">Market Intelligence</div>
+        </div>
+      </div>
+
+      <div class="user-box">
+        <div class="user-info">
+          <div class="user-email" id="userEmail">Loading…</div>
+          <div class="user-role">Dashboard</div>
+        </div>
+        <div class="user-avatar" id="userAvatar">?</div>
+        <button class="logout-btn" id="logoutBtn">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <nav class="sidebar" aria-label="Quick navigation">
+      <div class="sidebar-title">Navigate</div>
+
+      <a class="nav-link" href="index.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        Dashboard
+      </a>
+      <a class="nav-link" href="screener.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Stock Screener
+      </a>
+      <a class="nav-link" href="intraday-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h7l-1 8 11-14h-7z"/></svg>
+        Intraday Strategy
+      </a>
+      <a class="nav-link" href="week-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
+        1 Week Strategy
+      </a>
+      <a class="nav-link" href="month-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>
+        1 Month Strategy
+      </a>
+      <a class="nav-link" href="positional-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15l3-4 3 3 5-7"/></svg>
+        3–6 Month Strategy
+      </a>
+      <a class="nav-link active" href="watchlist.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.9 6.26L21 9.27l-4.5 4.38L17.8 21 12 17.77 6.2 21l1.3-7.35L3 9.27l6.1-1.01z"/></svg>
+        Watchlist
+      </a>
+      <a class="nav-link" href="settings.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        Settings
+      </a>
+
+      <div class="nav-divider"></div>
+
+      <a class="nav-link danger" href="#" id="sidebarLogout">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Logout
+      </a>
+    </nav>
+
+    <main>
+      <div class="page-heading">
+        <div>
+          <div class="page-title">Your <em>Watchlist</em></div>
+          <div class="page-sub">Up to 50 NSE symbols, stored locally in your browser — no Firestore reads/writes, so this never touches a paid Firebase quota. Scans automatically every time you log in — no manual search needed.</div>
+        </div>
+      </div>
+
+      <!-- ===================== ADD STOCK ===================== -->
+      <section class="panel" id="addPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <div class="panel-title">Add Stock</div>
+          </div>
+          <span class="badge" id="countBadge">0 / 50</span>
+        </div>
+        <div class="watchlist-body">
+          <div class="watchlist-add-row">
+            <div class="field-group">
+              <label for="addSymbolInput">NSE Symbol</label>
+              <input type="text" id="addSymbolInput" placeholder="e.g. RELIANCE, TCS, INFY" autocomplete="off" />
+            </div>
+            <button class="search-btn" id="addBtn" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add to Watchlist
+            </button>
+          </div>
+          <div class="btn-row">
+            <button class="btn-secondary" id="loadDefaultBtn" type="button">Load Default 50</button>
+            <button class="btn-secondary danger" id="clearAllBtn" type="button">Clear All</button>
+          </div>
+          <div class="field-hint">Capped at 50 symbols on purpose — keeps a full "Scan Watchlist" run bounded, so it stays inside a free-tier market-data provider's rate/daily limits once one is connected.</div>
+        </div>
+      </section>
+
+      <!-- ===================== WATCHLIST ===================== -->
+      <section class="panel" id="listPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.9 6.26L21 9.27l-4.5 4.38L17.8 21 12 17.77 6.2 21l1.3-7.35L3 9.27l6.1-1.01z"/></svg>
+            <div class="panel-title">Tracked Symbols</div>
+          </div>
+          <span class="watchlist-counter" id="listCounter"><strong>0</strong> stocks</span>
+        </div>
+        <div class="watchlist-body">
+          <div class="watchlist-list" id="watchlistList"></div>
+          <div class="empty-state" id="listEmptyState" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.9 6.26L21 9.27l-4.5 4.38L17.8 21 12 17.77 6.2 21l1.3-7.35L3 9.27l6.1-1.01z"/></svg>
+            <div class="empty-state-title">Watchlist is empty</div>
+            <div class="empty-state-sub">Add symbols above, or click "Load Default 50" for a ready-made Nifty 50 starter list.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== SCAN ===================== -->
+      <section class="panel" id="scanPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <div class="panel-title">Scan Watchlist</div>
+          </div>
+          <span class="badge">Sequential · rate-limited</span>
+        </div>
+        <div class="search-panel-body">
+          <div class="scan-controls-row">
+            <div class="field-group">
+              <label for="strategySelect">Strategy Engine</label>
+              <select id="strategySelect">
+                <option value="week">1 Week</option>
+                <option value="month" selected>1 Month</option>
+                <option value="positional">3–6 Month (Positional)</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label for="delayInput">Scan Delay (ms/symbol)</label>
+              <input type="number" id="delayInput" value="1500" min="200" step="100" />
+            </div>
+            <button class="search-btn" id="scanBtn" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              Scan Watchlist
+            </button>
+          </div>
+          <div class="field-hint">Raise the delay if your connected provider's free tier allows fewer requests per minute. Calls the same <code>MarketDataService.fetchSnapshot()</code> → <code>IndicatorMath.calculateAllIndicators()</code> → engine <code>.analyzeStock()</code> chain as the single-symbol pages, once per symbol — nothing is batched, faked, or cached as a shortcut.</div>
+          <div class="scan-progress-wrap" id="progressWrap" hidden>
+            <div class="scan-progress-label">
+              <span id="progressText">Scanning 0 / 0…</span>
+              <button class="btn-secondary danger" id="stopScanBtn" type="button" style="padding:4px 12px;font-size:11px;">Stop</button>
+            </div>
+            <div class="scan-progress-bar"><div class="scan-progress-fill" id="progressFill"></div></div>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="strategy-table" aria-describedby="scanEmptyState">
+            <thead>
+              <tr>
+                <th>Symbol</th><th>Score</th><th>Signal</th><th>Entry</th><th>Stop Loss</th><th>Target</th><th>Risk / Reward</th><th>Holding Period</th>
+              </tr>
+            </thead>
+            <tbody id="scanResultBody"></tbody>
+          </table>
+        </div>
+
+        <div class="empty-state" id="scanEmptyState">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          <div class="empty-state-title" id="scanEmptyTitle">Market data not connected</div>
+          <div class="empty-state-sub" id="scanEmptySub">Click "Scan Watchlist" above — results appear here once a real market-data provider is registered. No row is ever shown without a real fetched snapshot behind it.</div>
+          <div class="empty-state-cols">
+            <span>Score</span><span>Signal</span><span>Entry</span><span>Stop Loss</span><span>Target</span><span>R:R</span><span>Holding Period</span>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <footer>
+    &copy; 2026 <span>Stock Badshah</span>. All rights reserved. Research &amp; decision-support only — not investment advice. No output on this page implies guaranteed profit, return, accuracy, or target achievement.
+  </footer>
+
+  <script>
+    // ==========================================================================
+    // Auth guard — identical pattern to login.html / index.html / other pages.
+    // ==========================================================================
+    let currentUid = null;
+
+    (function () {
+      const userEmailEl = document.getElementById('userEmail');
+      const userAvatarEl = document.getElementById('userAvatar');
+      const logoutBtn = document.getElementById('logoutBtn');
+      const sidebarLogout = document.getElementById('sidebarLogout');
+
+      if (!window.firebaseReady) {
+        window.location.href = 'login.html';
+        return;
+      }
+
+      auth.onAuthStateChanged(function (user) {
+        if (!user) {
+          window.location.href = 'login.html';
+          return;
+        }
+
+        const email = user.email || 'Account';
+        userEmailEl.textContent = email;
+        userAvatarEl.textContent = email.charAt(0).toUpperCase();
+        currentUid = user.uid;
+        initWatchlist();
+        // Auto-scan on login/page-load — no manual click needed. Only runs
+        // if the watchlist actually has symbols in it. Uses the strategy
+        // currently selected in the dropdown (defaults to "1 Month").
+        if (watchlist.length > 0) {
+          runScan();
+        }
+        if (typeof window.onAuthReady === 'function') {
+          window.onAuthReady(user);
+        }
+      });
+
+      function doLogout(e) {
+        if (e) e.preventDefault();
+        auth.signOut().then(function () {
+          window.location.href = 'login.html';
+        }).catch(function (err) {
+          console.error('[Stock Badshah] Sign-out failed:', err.message);
+        });
+      }
+
+      logoutBtn.addEventListener('click', doLogout);
+      sidebarLogout.addEventListener('click', doLogout);
+    })();
+
+    // ==========================================================================
+    // Watchlist storage — localStorage only, namespaced per uid.
+    // Zero Firestore reads/writes, so this costs nothing against any
+    // Firebase plan. Hard-capped at MAX_WATCHLIST.
+    // ==========================================================================
+    const MAX_WATCHLIST = 50;
+
+    // Nifty 50 constituents — a reasonable, well-known default starter list.
+    // Purely a convenience seed; fully editable via Add/Remove below.
+    const DEFAULT_WATCHLIST = [
+      'RELIANCE','TCS','HDFCBANK','ICICIBANK','INFY','HINDUNILVR','ITC','SBIN',
+      'BHARTIARTL','KOTAKBANK','LT','AXISBANK','BAJFINANCE','ASIANPAINT','MARUTI',
+      'SUNPHARMA','TITAN','ULTRACEMCO','NESTLEIND','WIPRO','ADANIENT','ADANIPORTS',
+      'POWERGRID','NTPC','ONGC','TATAMOTORS','TATASTEEL','JSWSTEEL','COALINDIA',
+      'M&M','HCLTECH','TECHM','BAJAJFINSV','DRREDDY','GRASIM','CIPLA','EICHERMOT',
+      'DIVISLAB','BRITANNIA','HEROMOTOCO','HINDALCO','BPCL','INDUSINDBK',
+      'APOLLOHOSP','SBILIFE','HDFCLIFE','BAJAJ-AUTO','UPL','SHRIRAMFIN','LTIM',
+      'TATACONSUM'
+    ];
+
+    function storageKey() {
+      return 'stockbadshah_watchlist_' + (currentUid || 'anon');
+    }
+
+    function loadWatchlist() {
+      try {
+        const raw = localStorage.getItem(storageKey());
+        if (raw === null) return null; // never initialised yet
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (err) {
+        console.warn('[Stock Badshah] Failed to read watchlist from localStorage:', err);
+        return [];
+      }
+    }
+
+    function saveWatchlist(list) {
+      try {
+        localStorage.setItem(storageKey(), JSON.stringify(list));
+      } catch (err) {
+        console.warn('[Stock Badshah] Failed to save watchlist to localStorage:', err);
+        showToast('Could not save — browser storage unavailable.');
+      }
+    }
+
+    let watchlist = [];
+
+    function initWatchlist() {
+      const existing = loadWatchlist();
+      watchlist = existing === null ? DEFAULT_WATCHLIST.slice(0, MAX_WATCHLIST) : existing;
+      if (existing === null) saveWatchlist(watchlist);
+      renderWatchlist();
+    }
+
+    function normalizeSymbol(raw) {
+      let s = (raw || '').trim().toUpperCase();
+      if (s.indexOf('.') !== -1) s = s.split('.')[0]; // store bare symbol, suffix added at fetch time
+      return s;
+    }
+
+    function addSymbol(raw) {
+      const s = normalizeSymbol(raw);
+      if (!s) return;
+      if (watchlist.indexOf(s) !== -1) {
+        showToast(s + ' is already on your watchlist.');
+        return;
+      }
+      if (watchlist.length >= MAX_WATCHLIST) {
+        showToast('Watchlist is full (' + MAX_WATCHLIST + ' max). Remove one to add another.');
+        return;
+      }
+      watchlist.push(s);
+      saveWatchlist(watchlist);
+      renderWatchlist();
+      showToast(s + ' added to watchlist.');
+    }
+
+    function removeSymbol(symbol) {
+      watchlist = watchlist.filter(function (s) { return s !== symbol; });
+      saveWatchlist(watchlist);
+      renderWatchlist();
+    }
+
+    function renderWatchlist() {
+      const listEl = document.getElementById('watchlistList');
+      const emptyEl = document.getElementById('listEmptyState');
+      const counterEl = document.getElementById('listCounter');
+      const countBadge = document.getElementById('countBadge');
+
+      counterEl.innerHTML = '<strong>' + watchlist.length + '</strong> stocks';
+      countBadge.textContent = watchlist.length + ' / ' + MAX_WATCHLIST;
+      countBadge.className = 'badge' + (watchlist.length >= MAX_WATCHLIST ? ' status-full' : '');
+
+      if (watchlist.length === 0) {
+        listEl.innerHTML = '';
+        emptyEl.hidden = false;
+        return;
+      }
+      emptyEl.hidden = true;
+
+      listEl.innerHTML = '';
+      watchlist.forEach(function (symbol) {
+        const row = document.createElement('div');
+        row.className = 'watchlist-item';
+        row.innerHTML =
+          '<div class="watchlist-item-left">' +
+            '<span class="watchlist-symbol">' + symbol + '</span>' +
+            '<span class="watchlist-meta">NSE</span>' +
+          '</div>' +
+          '<div class="watchlist-item-left">' +
+            '<span class="watchlist-price-na">' +
+              '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+              'No live price' +
+            '</span>' +
+            '<button class="watchlist-remove-btn" data-symbol="' + symbol + '">Remove</button>' +
+          '</div>';
+        listEl.appendChild(row);
+      });
+
+      listEl.querySelectorAll('.watchlist-remove-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          removeSymbol(btn.getAttribute('data-symbol'));
+        });
+      });
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.classList.add('show');
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(function () { toast.classList.remove('show'); }, 2600);
+    }
+
+    document.getElementById('addBtn').addEventListener('click', function () {
+      const input = document.getElementById('addSymbolInput');
+      addSymbol(input.value);
+      input.value = '';
+      input.focus();
+    });
+    document.getElementById('addSymbolInput').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') document.getElementById('addBtn').click();
+    });
+    document.getElementById('loadDefaultBtn').addEventListener('click', function () {
+      watchlist = DEFAULT_WATCHLIST.slice(0, MAX_WATCHLIST);
+      saveWatchlist(watchlist);
+      renderWatchlist();
+      showToast('Loaded default 50-stock (Nifty 50) list.');
+    });
+    document.getElementById('clearAllBtn').addEventListener('click', function () {
+      if (watchlist.length === 0) return;
+      if (!confirm('Remove all ' + watchlist.length + ' symbols from your watchlist?')) return;
+      watchlist = [];
+      saveWatchlist(watchlist);
+      renderWatchlist();
+      showToast('Watchlist cleared.');
+    });
+
+    // ==========================================================================
+    // Scan — walks the watchlist sequentially, one MarketDataService.fetchSnapshot()
+    // call at a time, with a delay between calls. Same "never fabricate a row"
+    // rule as the single-symbol pages: a row only appears if fetchSnapshot()
+    // actually resolved. With NullDataProvider active (current default) every
+    // call rejects, so this always ends on the empty state below — by design.
+    // ==========================================================================
+    let scanCancelled = false;
+
+    function sleep(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
+
+    function fmtPrice(v) { return (typeof v === 'number' && Number.isFinite(v)) ? '₹' + v.toFixed(2) : '—'; }
+    function fmtRR(v) { return (typeof v === 'number' && Number.isFinite(v)) ? '1 : ' + v.toFixed(2) : '—'; }
+    function signalClass(signal) {
+      if (signal === 'Strong BUY Candidate' || signal === 'BUY Candidate') return 'status-open';
+      if (signal === 'AVOID') return 'status-closed';
+      return 'status-unknown';
+    }
+
+    async function analyzeOneSymbol(bareSymbol, strategy) {
+      const symbol = bareSymbol.indexOf('.') === -1 ? bareSymbol + '.NS' : bareSymbol;
+
+      if (!window.MarketDataService || typeof window.MarketDataService.fetchSnapshot !== 'function') {
+        throw new Error('MarketDataService not available');
+      }
+      const snapshot = await window.MarketDataService.fetchSnapshot(symbol);
+
+      if (!window.IndicatorMath) throw new Error('IndicatorMath not available');
+      const indicators = window.IndicatorMath.calculateAllIndicators(snapshot.dailyBars || []);
+
+      if (strategy === 'week') {
+        if (!window.WeekStrategyEngine) throw new Error('WeekStrategyEngine not available');
+        const input = window.MarketDataService.toWeekStrategyInput(snapshot, {
+          dma20: indicators.sma20.value, dma50: indicators.sma50.value, rsi14: indicators.rsi14.value,
+          macd: indicators.macd.macd, macdSignal: indicators.macd.macdSignal, macdHistogramPrev: indicators.macd.macdHistogramPrev,
+          avgVolume20d: indicators.avgVolume20.value, priceNDaysAgo: indicators.priceMomentum && indicators.priceMomentum.priceNDaysAgo,
+          recentSwingHigh: indicators.supportResistance.recentSwingHigh, recentSwingLow: indicators.supportResistance.recentSwingLow,
+          atr14: indicators.atr14.value,
+        });
+        return window.WeekStrategyEngine.analyzeStock(input);
+      }
+
+      if (strategy === 'positional') {
+        if (!window.PositionalStrategyEngine) throw new Error('PositionalStrategyEngine not available');
+        const input = window.MarketDataService.toPositionalStrategyInput(snapshot, {
+          dma50: indicators.sma50.value, dma200: indicators.sma200.value, rsi14: indicators.rsi14.value,
+          macd: indicators.macd.macd, macdSignal: indicators.macd.macdSignal, macdHistogramPrev: indicators.macd.macdHistogramPrev,
+          volumeAvg10d: indicators.volumeAvg10d.value, volumeAvgPrior10d: indicators.volumeAvgPrior10d.value, avgVolume20d: indicators.avgVolume20.value,
+          recentSwingHigh: indicators.supportResistance.recentSwingHigh, recentSwingLow: indicators.supportResistance.recentSwingLow,
+          atr14: indicators.atr14.value,
+        });
+        return window.PositionalStrategyEngine.analyzeStock(input);
+      }
+
+      // default: month
+      if (!window.MonthStrategyEngine) throw new Error('MonthStrategyEngine not available');
+      const input = window.MarketDataService.toMonthStrategyInput(snapshot, {
+        dma20: indicators.sma20.value, dma50: indicators.sma50.value, dma200: indicators.sma200.value, rsi14: indicators.rsi14.value,
+        macd: indicators.macd.macd, macdSignal: indicators.macd.macdSignal, macdHistogramPrev: indicators.macd.macdHistogramPrev,
+        volumeAvg10d: indicators.volumeAvg10d.value, volumeAvgPrior10d: indicators.volumeAvgPrior10d.value, avgVolume20d: indicators.avgVolume20.value,
+        recentSwingHigh: indicators.supportResistance.recentSwingHigh, recentSwingLow: indicators.supportResistance.recentSwingLow,
+        atr14: indicators.atr14.value,
+      });
+      return window.MonthStrategyEngine.analyzeStock(input);
+    }
+
+    function renderScanResults(results) {
+      const body = document.getElementById('scanResultBody');
+      const emptyEl = document.getElementById('scanEmptyState');
+      body.innerHTML = '';
+
+      if (results.length === 0) {
+        emptyEl.hidden = false;
+        return;
+      }
+      emptyEl.hidden = true;
+
+      results.sort(function (a, b) { return (b.score || 0) - (a.score || 0); });
+
+      results.forEach(function (result) {
+        const tr = document.createElement('tr');
+        const targetText = (typeof result.target1 === 'number')
+          ? fmtPrice(result.target1) + (typeof result.target2 === 'number' ? ' / ' + fmtPrice(result.target2) : '')
+          : '—';
+        tr.innerHTML =
+          '<td>' + (result.symbol || '—') + '</td>' +
+          '<td>' + result.score + ' / 100</td>' +
+          '<td><span class="badge ' + signalClass(result.signal) + '">' + result.signal + '</span></td>' +
+          '<td>' + fmtPrice(result.entryPrice) + '</td>' +
+          '<td>' + fmtPrice(result.stopLoss) + '</td>' +
+          '<td>' + targetText + '</td>' +
+          '<td>' + fmtRR(result.riskReward) + '</td>' +
+          '<td>' + (result.holdingPeriod || '—') + '</td>';
+        body.appendChild(tr);
+      });
+    }
+
+    async function runScan() {
+      if (watchlist.length === 0) {
+        showToast('Add some symbols to your watchlist first.');
+        return;
+      }
+
+      const strategy = document.getElementById('strategySelect').value;
+      const delayMs = Math.max(200, parseInt(document.getElementById('delayInput').value, 10) || 1500);
+      const scanBtn = document.getElementById('scanBtn');
+      const progressWrap = document.getElementById('progressWrap');
+      const progressText = document.getElementById('progressText');
+      const progressFill = document.getElementById('progressFill');
+      const emptyTitle = document.getElementById('scanEmptyTitle');
+      const emptySub = document.getElementById('scanEmptySub');
+
+      scanCancelled = false;
+      scanBtn.disabled = true;
+      progressWrap.hidden = false;
+      document.getElementById('scanResultBody').innerHTML = '';
+      document.getElementById('scanEmptyState').hidden = true;
+
+      const results = [];
+      let failCount = 0;
+
+      for (let i = 0; i < watchlist.length; i++) {
+        if (scanCancelled) break;
+        const symbol = watchlist[i];
+        progressText.textContent = 'Scanning ' + (i + 1) + ' / ' + watchlist.length + '… (' + symbol + ')';
+        progressFill.style.width = Math.round(((i + 1) / watchlist.length) * 100) + '%';
+
+        try {
+          const result = await analyzeOneSymbol(symbol, strategy);
+          results.push(result);
+        } catch (err) {
+          failCount++;
+          console.info('[Stock Badshah] Scan: no data for ' + symbol + ' — ' + (err && err.message ? err.message : err));
+        }
+
+        if (i < watchlist.length - 1) await sleep(delayMs);
+      }
+
+      progressWrap.hidden = true;
+      scanBtn.disabled = false;
+
+      if (results.length === 0) {
+        emptyTitle.textContent = scanCancelled ? 'Scan stopped' : 'Market data not connected';
+        emptySub.textContent = scanCancelled
+          ? 'Scan was stopped before any symbol returned data.'
+          : 'Scanned ' + watchlist.length + ' symbol(s), 0 returned data — a real market-data provider needs to be registered first. No row is ever shown without a real fetched snapshot.';
+      }
+      renderScanResults(results);
+
+      if (results.length > 0) {
+        showToast('Scan complete: ' + results.length + ' result(s), ' + failCount + ' with no data.');
+      }
+    }
+
+    document.getElementById('scanBtn').addEventListener('click', runScan);
+    document.getElementById('stopScanBtn').addEventListener('click', function () {
+      scanCancelled = true;
+    });
+  </script>
+
+</body>
+</html>

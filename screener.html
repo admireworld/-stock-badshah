@@ -1,0 +1,1358 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Stock Screener — Stock Badshah</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<!-- Firebase (Authentication only) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-auth-compat.js" crossorigin="anonymous"></script>
+<script src="firebase-config.js"></script>
+
+<!--
+  ============================================================================
+  STATUS: Design/structure only, same as every other file in this drop.
+
+  - NO paid market-data API is connected here or anywhere in this project.
+  - NO stock price, score, signal, PE, ROE, ROCE, growth %, D/E, RSI,
+    volume, entry, stop-loss, target, R:R, or holding period on this page
+    is real, sample, or hardcoded. The results table always renders the
+    "Market data not connected yet" empty state — there is no code path on
+    this page that inserts a fabricated row.
+  - This file does NOT modify index.html, login.html, firebase-config.js,
+    week-strategy-engine.js, month-strategy-engine.js,
+    positional-strategy-engine.js, indicator-math.js, or
+    market-data-service.js. It only *references* them (script tags +
+    commented wiring notes) so a future drop can connect real data and a
+    real search/filter/run flow without restructuring this page.
+  - Auth guard below uses the exact same window.firebaseReady /
+    onAuthStateChanged pattern already used in login.html and index.html.
+  ============================================================================
+-->
+
+<!-- Future wiring (not called anywhere in this file yet):
+       market-data-service.js        -> MarketDataService.fetchSnapshot(symbol)
+       indicator-math.js             -> IndicatorMath.calculateAllIndicators(dailyBars)
+       week-strategy-engine.js       -> WeekStrategyEngine.analyzeStock(input)
+       month-strategy-engine.js      -> MonthStrategyEngine.analyzeStock(input)
+       positional-strategy-engine.js -> PositionalStrategyEngine.analyzeStock(input)
+
+     Intended future flow for a single searched symbol (see
+     runScreenerSearch() stub near the bottom of this file):
+       1. snapshot   = await MarketDataService.fetchSnapshot(symbol)
+       2. indicators = IndicatorMath.calculateAllIndicators(snapshot.dailyBars)
+       3. selected strategy decides the adapter + engine:
+            "week"       -> MarketDataService.toWeekStrategyInput(snapshot, indicators)
+                              -> WeekStrategyEngine.analyzeStock(input)
+            "month"      -> MarketDataService.toMonthStrategyInput(snapshot, indicators)
+                              -> MonthStrategyEngine.analyzeStock(input)
+            "positional" -> a future toPositionalStrategyInput(snapshot, indicators)
+                              -> PositionalStrategyEngine.analyzeStock(input)
+       4. result rows get pushed into #resultsBody and the empty state hides.
+     Included here as plain <script> tags so every engine is available on
+     window the moment that wiring happens, but nothing on this page calls
+     any of them yet. -->
+<script src="market-data-service.js"></script>
+<!-- Browser-safe provider that talks to OUR deployed proxy (not Yahoo directly —
+     avoids the browser CORS block, see providers/browser-data-provider.js) and
+     market-data-config.js, which registers it if a real proxy URL is configured.
+     Until that URL is set, MarketDataService keeps using its safe NullDataProvider
+     default — nothing below silently switches to fake data. -->
+<script src="providers/browser-data-provider.js"></script>
+<script src="market-data-config.js"></script>
+<script src="indicator-math.js"></script>
+<script src="week-strategy-engine.js"></script>
+<script src="month-strategy-engine.js"></script>
+<script src="positional-strategy-engine.js"></script>
+
+<style>
+  :root{
+    --bg: #0A0F1C;
+    --surface: #111A2C;
+    --surface-2: #16213A;
+    --border: #223252;
+    --gold: #D4A94A;
+    --gold-soft: rgba(212,169,74,0.14);
+    --text: #F3EFE6;
+    --text-muted: #8C96AE;
+    --up: #3FAE6A;
+    --danger: #E0645A;
+  }
+
+  *{ margin:0; padding:0; box-sizing:border-box; }
+
+  html,body{
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body{
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background-image:
+      radial-gradient(circle at 15% 0%, rgba(212,169,74,0.07), transparent 45%),
+      radial-gradient(circle at 100% 20%, rgba(212,169,74,0.05), transparent 40%);
+  }
+
+  a{ color: inherit; text-decoration: none; }
+  ul{ list-style: none; }
+  button{ font-family: inherit; }
+
+  /* ---------- HEADER ---------- */
+  header{
+    border-bottom: 1px solid var(--border);
+    background: rgba(10,15,28,0.85);
+    backdrop-filter: blur(8px);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .header-inner{
+    max-width: 1280px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 28px;
+    gap: 16px;
+  }
+
+  .brand{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .crown-mark{
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
+  }
+
+  .brand-text{
+    display: flex;
+    flex-direction: column;
+    line-height: 1;
+  }
+
+  .brand-name{
+    font-family: 'Playfair Display', serif;
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: 0.3px;
+    color: var(--text);
+  }
+
+  .brand-name span{ color: var(--gold); }
+
+  .brand-tag{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+
+  .user-box{
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .user-avatar{
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: var(--gold-soft);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--gold);
+    flex-shrink: 0;
+  }
+
+  .user-info{
+    display: flex;
+    flex-direction: column;
+    line-height: 1.3;
+  }
+
+  .user-email{
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .user-role{
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .logout-btn{
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 7px;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .logout-btn:hover{
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+
+  /* ---------- LAYOUT ---------- */
+  .layout{
+    flex: 1;
+    max-width: 1280px;
+    width: 100%;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 24px;
+    padding: 24px 28px 48px;
+  }
+
+  /* ---------- SIDEBAR NAV ---------- */
+  .sidebar{
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .sidebar-title{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 0 12px;
+    margin-bottom: 8px;
+  }
+
+  .nav-link{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .nav-link:hover{
+    background: var(--surface);
+    color: var(--text);
+    border-color: var(--border);
+  }
+
+  .nav-link.active{
+    background: var(--gold-soft);
+    color: var(--gold);
+    border-color: rgba(212,169,74,0.35);
+  }
+
+  .nav-link svg{ width: 16px; height: 16px; flex-shrink: 0; }
+
+  .nav-divider{
+    height: 1px;
+    background: var(--border);
+    margin: 12px 4px;
+  }
+
+  .nav-link.danger{ color: var(--danger); }
+  .nav-link.danger:hover{ background: rgba(224,101,90,0.1); border-color: rgba(224,101,90,0.3); }
+
+  /* ---------- MAIN ---------- */
+  main{
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    min-width: 0;
+  }
+
+  .page-heading{
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .page-title{
+    font-family: 'Playfair Display', serif;
+    font-weight: 700;
+    font-size: 24px;
+  }
+
+  .page-title em{ font-style: normal; color: var(--gold); }
+
+  .page-sub{
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+
+  section.panel{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .panel-head{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .panel-head-left{ display: flex; align-items: center; gap: 10px; }
+
+  .panel-title{
+    font-family: 'Playfair Display', serif;
+    font-weight: 700;
+    font-size: 17px;
+  }
+
+  .panel-title-icon{ width: 18px; height: 18px; color: var(--gold); flex-shrink: 0; }
+
+  .badge{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+
+  /* ---------- SEARCH + HORIZON (top section) ---------- */
+  .search-panel-body{
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .search-row{
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 14px;
+    align-items: end;
+  }
+
+  .field-group{
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .field-group label{
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .field-group input[type="text"],
+  .field-group input[type="number"],
+  .field-group select{
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 14px;
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .field-group input::placeholder{ color: #5C6684; }
+
+  .field-group input:focus,
+  .field-group select:focus{
+    border-color: var(--gold);
+    box-shadow: 0 0 0 3px var(--gold-soft);
+  }
+
+  .search-btn{
+    background: var(--gold);
+    color: #17110A;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 24px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: filter 0.15s ease, transform 0.05s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .search-btn svg{ width: 16px; height: 16px; }
+  .search-btn:hover{ filter: brightness(1.08); }
+  .search-btn:active{ transform: translateY(1px); }
+
+  .horizon-row{
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .pill-group{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .pill{
+    padding: 9px 16px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-muted);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+  }
+
+  .pill:hover{ border-color: var(--gold); color: var(--text); }
+
+  .pill.selected{
+    background: var(--gold-soft);
+    border-color: rgba(212,169,74,0.5);
+    color: var(--gold);
+  }
+
+  /* ---------- FILTERS ---------- */
+  .filters-body{
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .filters-grid{
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+  }
+
+  .filter-field{
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .filter-field label{
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .range-inputs{
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .range-inputs input{
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 9px 10px;
+    font-size: 13px;
+    color: var(--text);
+    outline: none;
+    min-width: 0;
+  }
+
+  .range-inputs input:focus{ border-color: var(--gold); }
+
+  .range-inputs span{ color: var(--text-muted); font-size: 12px; flex-shrink: 0; }
+
+  .filter-field select{
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 9px 10px;
+    font-size: 13px;
+    color: var(--text);
+    outline: none;
+  }
+
+  .filter-field select:focus{ border-color: var(--gold); }
+
+  .filters-actions{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+
+  .filters-note{
+    font-size: 11.5px;
+    color: var(--text-muted);
+  }
+
+  .btn-row{ display: flex; gap: 10px; flex-wrap: wrap; }
+
+  .btn-secondary{
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .btn-secondary:hover{ border-color: var(--gold); color: var(--text); }
+
+  .btn-primary{
+    background: var(--gold);
+    color: #17110A;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: filter 0.15s ease;
+  }
+
+  .btn-primary:hover{ filter: brightness(1.08); }
+
+  /* ---------- STRATEGY SELECTOR ---------- */
+  .strategy-select-body{
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .strategy-cards{
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+
+  .strategy-card{
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-2);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+
+  .strategy-card:hover{ border-color: var(--gold); }
+
+  .strategy-card.selected{
+    border-color: rgba(212,169,74,0.6);
+    background: var(--gold-soft);
+  }
+
+  .strategy-card input[type="radio"]{
+    margin-top: 3px;
+    accent-color: var(--gold);
+    flex-shrink: 0;
+  }
+
+  .strategy-card-text{ display: flex; flex-direction: column; gap: 3px; }
+  .strategy-card-title{ font-size: 13.5px; font-weight: 700; }
+  .strategy-card-sub{ font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
+
+  /* ---------- RESULTS TABLE ---------- */
+  .table-wrap{ overflow-x: auto; }
+
+  table.results-table{
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 1500px;
+  }
+
+  table.results-table thead th{
+    text-align: left;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+  }
+
+  table.results-table tbody td{
+    padding: 13px 14px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  /* ---------- EMPTY STATE ---------- */
+  .empty-state{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 12px;
+    padding: 56px 24px;
+    color: var(--text-muted);
+  }
+
+  .empty-state svg{
+    width: 44px;
+    height: 44px;
+    color: var(--gold);
+    opacity: 0.55;
+  }
+
+  .empty-state-title{
+    font-family: 'Playfair Display', serif;
+    font-weight: 700;
+    font-size: 18px;
+    color: var(--text);
+  }
+
+  .empty-state-sub{
+    font-size: 13px;
+    max-width: 480px;
+    line-height: 1.7;
+  }
+
+  .empty-state-cols{
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+    max-width: 620px;
+  }
+
+  .empty-state-cols span{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 3px 9px;
+  }
+
+  /* ---------- FOOTER ---------- */
+  footer{
+    border-top: 1px solid var(--border);
+    padding: 22px 28px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  footer span{ color: var(--gold); }
+
+  /* ---------- MOBILE ---------- */
+  @media (max-width: 980px){
+    .filters-grid{ grid-template-columns: repeat(2, 1fr); }
+    .strategy-cards{ grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 880px){
+    .layout{
+      grid-template-columns: 1fr;
+      padding: 18px 16px 40px;
+    }
+    .sidebar{
+      flex-direction: row;
+      overflow-x: auto;
+      gap: 8px;
+      padding-bottom: 4px;
+    }
+    .sidebar-title{ display: none; }
+    .nav-link{ white-space: nowrap; }
+    .nav-divider{ display: none; }
+    .search-row{ grid-template-columns: 1fr; }
+    .search-btn{ justify-content: center; }
+  }
+
+  @media (max-width: 620px){
+    .filters-grid{ grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 460px){
+    .header-inner{ padding: 14px 16px; }
+    .user-email{ max-width: 110px; }
+  }
+</style>
+</head>
+<body>
+
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <svg class="crown-mark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 34 L6 16 L15 24 L24 10 L33 24 L42 16 L40 34 Z" stroke="#D4A94A" stroke-width="2.2" stroke-linejoin="round" fill="rgba(212,169,74,0.08)"/>
+          <circle cx="24" cy="10" r="2" fill="#D4A94A"/>
+          <circle cx="6" cy="16" r="2" fill="#D4A94A"/>
+          <circle cx="42" cy="16" r="2" fill="#D4A94A"/>
+          <line x1="8" y1="38" x2="40" y2="38" stroke="#D4A94A" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <div class="brand-text">
+          <div class="brand-name">Stock <span>Badshah</span></div>
+          <div class="brand-tag">Market Intelligence</div>
+        </div>
+      </div>
+
+      <div class="user-box">
+        <div class="user-info">
+          <div class="user-email" id="userEmail">Loading…</div>
+          <div class="user-role">Stock Screener</div>
+        </div>
+        <div class="user-avatar" id="userAvatar">?</div>
+        <button class="logout-btn" id="logoutBtn">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <!-- ============ SIDEBAR / NAVIGATION ============ -->
+    <nav class="sidebar" aria-label="Main navigation">
+      <div class="sidebar-title">Navigate</div>
+
+      <a class="nav-link" href="index.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        Dashboard
+      </a>
+      <a class="nav-link active" href="screener.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Stock Screener
+      </a>
+      <a class="nav-link" href="intraday-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h7l-1 8 11-14h-7z"/></svg>
+        Intraday Strategy
+      </a>
+      <a class="nav-link" href="week-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
+        1 Week
+      </a>
+      <a class="nav-link" href="month-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>
+        1 Month
+      </a>
+      <a class="nav-link" href="positional-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15l3-4 3 3 5-7"/></svg>
+        3–6 Months
+      </a>
+      <a class="nav-link" href="watchlist.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.9 6.26L21 9.27l-4.5 4.38L17.8 21 12 17.77 6.2 21l1.3-7.35L3 9.27l6.1-1.01z"/></svg>
+        Watchlist
+      </a>
+      <a class="nav-link" href="settings.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        Settings
+      </a>
+
+      <div class="nav-divider"></div>
+
+      <a class="nav-link danger" href="#" id="sidebarLogout">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Logout
+      </a>
+    </nav>
+
+    <!-- ============ MAIN CONTENT ============ -->
+    <main>
+
+      <div class="page-heading">
+        <div>
+          <div class="page-title">Stock <em>Screener</em></div>
+          <div class="page-sub">Search a symbol, pick a horizon and strategy, and (once connected) run it through the rule engine — research &amp; decision-support only.</div>
+        </div>
+      </div>
+
+      <!-- ===================== TOP SECTION: SEARCH + HORIZON ===================== -->
+      <section class="panel" id="searchPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <div class="panel-title">Search Stock</div>
+          </div>
+          <span class="badge">NSE symbols</span>
+        </div>
+
+        <div class="search-panel-body">
+          <div class="search-row">
+            <div class="field-group">
+              <label for="symbolSearch">NSE Symbol</label>
+              <input type="text" id="symbolSearch" placeholder="e.g. RELIANCE, TCS, INFY" autocomplete="off" />
+            </div>
+            <button class="search-btn" id="searchBtn" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              Search
+            </button>
+          </div>
+
+          <div class="horizon-row">
+            <label for="horizonPills" style="font-size:11px;font-weight:600;letter-spacing:0.6px;text-transform:uppercase;color:var(--text-muted);font-family:'JetBrains Mono',monospace;">Time Horizon</label>
+            <div class="pill-group" id="horizonPills" role="radiogroup" aria-label="Time horizon">
+              <button type="button" class="pill" data-horizon="week">1 Week</button>
+              <button type="button" class="pill" data-horizon="month">1 Month</button>
+              <button type="button" class="pill" data-horizon="positional">3–6 Months</button>
+              <button type="button" class="pill selected" data-horizon="all">All</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== FILTERS ===================== -->
+      <section class="panel" id="filtersPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16l-6.5 8.5V19l-3 2v-8.5z"/></svg>
+            <div class="panel-title">Filters</div>
+          </div>
+          <span class="badge">Applied when a provider is connected</span>
+        </div>
+
+        <div class="filters-body">
+          <div class="filters-grid">
+            <div class="filter-field">
+              <label for="filterMinScore">Minimum Score</label>
+              <input type="number" id="filterMinScore" min="0" max="100" placeholder="e.g. 70" />
+            </div>
+
+            <div class="filter-field">
+              <label>Market Cap (₹ Cr)</label>
+              <div class="range-inputs">
+                <input type="number" id="filterMcapMin" placeholder="Min" />
+                <span>–</span>
+                <input type="number" id="filterMcapMax" placeholder="Max" />
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <label>PE</label>
+              <div class="range-inputs">
+                <input type="number" id="filterPeMin" placeholder="Min" />
+                <span>–</span>
+                <input type="number" id="filterPeMax" placeholder="Max" />
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <label>ROE (%)</label>
+              <div class="range-inputs">
+                <input type="number" id="filterRoeMin" placeholder="Min" />
+                <span>–</span>
+                <input type="number" id="filterRoeMax" placeholder="Max" />
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <label>ROCE (%)</label>
+              <div class="range-inputs">
+                <input type="number" id="filterRoceMin" placeholder="Min" />
+                <span>–</span>
+                <input type="number" id="filterRoceMax" placeholder="Max" />
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <label>Debt / Equity</label>
+              <div class="range-inputs">
+                <input type="number" id="filterDeMin" placeholder="Min" />
+                <span>–</span>
+                <input type="number" id="filterDeMax" placeholder="Max" />
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <label>Sales Growth YoY (%)</label>
+              <div class="range-inputs">
+                <input type="number" id="filterSalesGrowthMin" placeholder="Min" />
+                <span>–</span>
+                <input type="number" id="filterSalesGrowthMax" placeholder="Max" />
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <label>Profit Growth YoY (%)</label>
+              <div class="range-inputs">
+                <input type="number" id="filterProfitGrowthMin" placeholder="Min" />
+                <span>–</span>
+                <input type="number" id="filterProfitGrowthMax" placeholder="Max" />
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <label>RSI (14)</label>
+              <div class="range-inputs">
+                <input type="number" id="filterRsiMin" placeholder="Min" />
+                <span>–</span>
+                <input type="number" id="filterRsiMax" placeholder="Max" />
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <label>Volume (vs 20d avg)</label>
+              <select id="filterVolume">
+                <option value="">Any</option>
+                <option value="above1x">Above 1.0x avg</option>
+                <option value="above1_5x">Above 1.5x avg</option>
+                <option value="above2x">Above 2.0x avg</option>
+              </select>
+            </div>
+
+            <div class="filter-field">
+              <label>Signal</label>
+              <select id="filterSignal">
+                <option value="">Any</option>
+                <option value="strong_buy">Strong BUY Candidate</option>
+                <option value="buy">BUY Candidate</option>
+                <option value="watch">WATCH</option>
+                <option value="wait">WAIT</option>
+                <option value="avoid">AVOID</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="filters-actions">
+            <div class="filters-note">Filters are stored on this page but not applied to anything yet — no data source is connected.</div>
+            <div class="btn-row">
+              <button class="btn-secondary" id="resetFiltersBtn" type="button">Reset Filters</button>
+              <button class="btn-primary" id="applyFiltersBtn" type="button">Apply Filters</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== STRATEGY SELECTOR ===================== -->
+      <section class="panel" id="strategySelectPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>
+            <div class="panel-title">Strategy</div>
+          </div>
+          <span class="badge">Choose which engine will run</span>
+        </div>
+
+        <div class="strategy-select-body">
+          <div class="strategy-cards" id="strategyCards" role="radiogroup" aria-label="Strategy selection">
+            <label class="strategy-card selected" data-strategy="week">
+              <input type="radio" name="strategy" value="week" checked />
+              <div class="strategy-card-text">
+                <div class="strategy-card-title">1 Week Strategy</div>
+                <div class="strategy-card-sub">Short-term momentum, technical only. Will call WeekStrategyEngine.analyzeStock().</div>
+              </div>
+            </label>
+
+            <label class="strategy-card" data-strategy="month">
+              <input type="radio" name="strategy" value="month" />
+              <div class="strategy-card-text">
+                <div class="strategy-card-title">1 Month Strategy</div>
+                <div class="strategy-card-sub">Technical + fundamentals + valuation. Will call MonthStrategyEngine.analyzeStock().</div>
+              </div>
+            </label>
+
+            <label class="strategy-card" data-strategy="positional">
+              <input type="radio" name="strategy" value="positional" />
+              <div class="strategy-card-text">
+                <div class="strategy-card-title">3–6 Month Strategy</div>
+                <div class="strategy-card-sub">Long-term trend + quality + relative strength. Will call PositionalStrategyEngine.analyzeStock().</div>
+              </div>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== RESULTS ===================== -->
+      <section class="panel" id="resultsPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+            <div class="panel-title">Results</div>
+          </div>
+          <span class="badge" id="resultsCountBadge">0 results</span>
+        </div>
+
+        <div class="table-wrap" id="resultsTableWrap" hidden>
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th>Stock</th>
+                <th>Price</th>
+                <th>Score</th>
+                <th>Signal</th>
+                <th>PE</th>
+                <th>ROE</th>
+                <th>ROCE</th>
+                <th>Sales Growth</th>
+                <th>Profit Growth</th>
+                <th>Debt/Equity</th>
+                <th>RSI</th>
+                <th>Volume</th>
+                <th>Entry</th>
+                <th>Stop Loss</th>
+                <th>Target 1</th>
+                <th>Target 2</th>
+                <th>Risk/Reward</th>
+                <th>Holding Period</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody"><!-- Populated by the selected strategy engine's analyzeStock() output once market-data-service.js has a real provider registered. Intentionally empty in this drop. --></tbody>
+          </table>
+        </div>
+
+        <div class="empty-state" id="resultsEmptyState">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="12"/><line x1="11" y1="15" x2="11.01" y2="15"/></svg>
+          <div class="empty-state-title">Market data not connected yet</div>
+          <div class="empty-state-sub">Search a symbol and pick a strategy above — once a real market-data provider is registered in market-data-service.js, results will populate this table with the selected engine's actual output. No result shown here is ever a placeholder or sample value.</div>
+          <div class="empty-state-cols">
+            <span>Stock</span><span>Price</span><span>Score</span><span>Signal</span><span>PE</span><span>ROE</span><span>ROCE</span><span>Sales Growth</span><span>Profit Growth</span><span>Debt/Equity</span><span>RSI</span><span>Volume</span><span>Entry</span><span>Stop Loss</span><span>Target 1</span><span>Target 2</span><span>Risk/Reward</span><span>Holding Period</span>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer>
+    &copy; 2026 <span>Stock Badshah</span>. All rights reserved. Research &amp; decision-support only — not investment advice. No output on this page implies guaranteed profit, return, accuracy, or target achievement.
+  </footer>
+
+  <script>
+    // ==========================================================================
+    // Auth guard — identical pattern to login.html / index.html: if Firebase
+    // isn't configured, or the user isn't logged in, this page does not
+    // pretend to be a working screener behind a wall; it sends the user to
+    // login.html.
+    // ==========================================================================
+    (function () {
+      const userEmailEl = document.getElementById('userEmail');
+      const userAvatarEl = document.getElementById('userAvatar');
+      const logoutBtn = document.getElementById('logoutBtn');
+      const sidebarLogout = document.getElementById('sidebarLogout');
+
+      if (!window.firebaseReady) {
+        window.location.href = 'login.html';
+        return;
+      }
+
+      auth.onAuthStateChanged(function (user) {
+        if (!user) {
+          window.location.href = 'login.html';
+          return;
+        }
+        const email = user.email || 'Account';
+        userEmailEl.textContent = email;
+        userAvatarEl.textContent = email.charAt(0).toUpperCase();
+      });
+
+      function doLogout(e) {
+        if (e) e.preventDefault();
+        auth.signOut().then(function () {
+          window.location.href = 'login.html';
+        }).catch(function (err) {
+          console.error('[Stock Badshah] Sign-out failed:', err.message);
+        });
+      }
+
+      logoutBtn.addEventListener('click', doLogout);
+      sidebarLogout.addEventListener('click', doLogout);
+    })();
+
+    // ==========================================================================
+    // UI-only state and interactions below. Nothing here calls
+    // MarketDataService, IndicatorMath, or any strategy engine — it only
+    // manages which pills/cards are visually selected and what the current
+    // screener state object looks like, so future wiring has a clear,
+    // single place to plug into (runScreenerSearch()).
+    // ==========================================================================
+    (function () {
+      const state = {
+        symbol: '',
+        horizon: 'all',       // 'week' | 'month' | 'positional' | 'all'
+        strategy: 'week',     // 'week' | 'month' | 'positional'
+        filters: {
+          minScore: null,
+          marketCap: { min: null, max: null },
+          pe: { min: null, max: null },
+          roe: { min: null, max: null },
+          roce: { min: null, max: null },
+          debtToEquity: { min: null, max: null },
+          salesGrowth: { min: null, max: null },
+          profitGrowth: { min: null, max: null },
+          rsi: { min: null, max: null },
+          volume: '',
+          signal: ''
+        }
+      };
+
+      // ---- Time Horizon pills ----
+      const horizonPills = document.querySelectorAll('#horizonPills .pill');
+      horizonPills.forEach(function (pill) {
+        pill.addEventListener('click', function () {
+          horizonPills.forEach(function (p) { p.classList.remove('selected'); });
+          pill.classList.add('selected');
+          state.horizon = pill.getAttribute('data-horizon');
+        });
+      });
+
+      // ---- Strategy cards ----
+      const strategyCards = document.querySelectorAll('.strategy-card');
+      strategyCards.forEach(function (card) {
+        card.addEventListener('click', function () {
+          strategyCards.forEach(function (c) { c.classList.remove('selected'); });
+          card.classList.add('selected');
+          const radio = card.querySelector('input[type="radio"]');
+          radio.checked = true;
+          state.strategy = card.getAttribute('data-strategy');
+        });
+      });
+
+      // ---- Filters: read into state (values only, nothing applied yet) ----
+      function readFilters() {
+        state.filters.minScore = numOrNull('filterMinScore');
+        state.filters.marketCap = { min: numOrNull('filterMcapMin'), max: numOrNull('filterMcapMax') };
+        state.filters.pe = { min: numOrNull('filterPeMin'), max: numOrNull('filterPeMax') };
+        state.filters.roe = { min: numOrNull('filterRoeMin'), max: numOrNull('filterRoeMax') };
+        state.filters.roce = { min: numOrNull('filterRoceMin'), max: numOrNull('filterRoceMax') };
+        state.filters.debtToEquity = { min: numOrNull('filterDeMin'), max: numOrNull('filterDeMax') };
+        state.filters.salesGrowth = { min: numOrNull('filterSalesGrowthMin'), max: numOrNull('filterSalesGrowthMax') };
+        state.filters.profitGrowth = { min: numOrNull('filterProfitGrowthMin'), max: numOrNull('filterProfitGrowthMax') };
+        state.filters.rsi = { min: numOrNull('filterRsiMin'), max: numOrNull('filterRsiMax') };
+        state.filters.volume = document.getElementById('filterVolume').value;
+        state.filters.signal = document.getElementById('filterSignal').value;
+      }
+
+      function numOrNull(id) {
+        const el = document.getElementById(id);
+        if (!el || el.value === '') return null;
+        const n = Number(el.value);
+        return Number.isNaN(n) ? null : n;
+      }
+
+      document.getElementById('applyFiltersBtn').addEventListener('click', function () {
+        readFilters();
+        // No provider connected — filters are captured in `state.filters`
+        // for the future runScreenerSearch() call, but nothing is applied
+        // to a result set yet because there is no result set.
+        renderEmptyState();
+      });
+
+      document.getElementById('resetFiltersBtn').addEventListener('click', function () {
+        document.querySelectorAll('.filters-grid input, .filters-grid select').forEach(function (el) {
+          el.value = '';
+        });
+        readFilters();
+      });
+
+      // ---- Search ----
+      document.getElementById('searchBtn').addEventListener('click', function () {
+        state.symbol = document.getElementById('symbolSearch').value.trim().toUpperCase();
+        runScreenerSearch();
+      });
+      document.getElementById('symbolSearch').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          state.symbol = this.value.trim().toUpperCase();
+          runScreenerSearch();
+        }
+      });
+
+      function renderEmptyState() {
+        document.getElementById('resultsTableWrap').hidden = true;
+        document.getElementById('resultsEmptyState').hidden = false;
+        document.getElementById('resultsCountBadge').textContent = '0 results';
+      }
+
+      // ------------------------------------------------------------------
+      // Strategy selector -> engine map. Pure lookup, no calculation logic
+      // of its own — each engine's actual scoring rules are untouched,
+      // this only decides *which* already-loaded engine module handles the
+      // currently-selected strategy card. Defensive by design: if a
+      // <script> tag ever failed to load (network hiccup, wrong path,
+      // etc.), the corresponding engine is simply undefined here rather
+      // than throwing — callers check for that before using it.
+      // ------------------------------------------------------------------
+      function getSelectedEngine(strategyKey) {
+        switch (strategyKey) {
+          case 'week':
+            return {
+              key: 'week',
+              label: 'Week Strategy Engine',
+              engine: window.WeekStrategyEngine,
+              toInput: window.MarketDataService && window.MarketDataService.toWeekStrategyInput
+            };
+          case 'month':
+            return {
+              key: 'month',
+              label: 'Month Strategy Engine',
+              engine: window.MonthStrategyEngine,
+              toInput: window.MarketDataService && window.MarketDataService.toMonthStrategyInput
+            };
+          case 'positional':
+            return {
+              key: 'positional',
+              label: 'Positional Strategy Engine',
+              engine: window.PositionalStrategyEngine,
+              toInput: window.MarketDataService && window.MarketDataService.toPositionalStrategyInput
+            };
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Real entry point now, but the outcome today is unchanged: the
+       * results table stays empty and "Market data not connected yet"
+       * keeps showing, because MarketDataService still ships only
+       * NullDataProvider (see market-data-service.js / DATA-INTEGRATION-
+       * DESIGN.md §3) — every fetchSnapshot() call rejects by design.
+       *
+       * What IS wired up for real:
+       *   1. state.strategy decides which engine module is selected
+       *      (WeekStrategyEngine / MonthStrategyEngine /
+       *      PositionalStrategyEngine) via getSelectedEngine() above.
+       *   2. On a search, MarketDataService.fetchSnapshot(symbol) is
+       *      actually called.
+       *   3. If it ever resolves (i.e. once a real provider is
+       *      registered), indicators are computed via
+       *      IndicatorMath.calculateAllIndicators(), mapped through the
+       *      selected engine's adapter (toWeekStrategyInput /
+       *      toMonthStrategyInput / toPositionalStrategyInput), and
+       *      scored via <Engine>.analyzeStock(). That result is logged to
+       *      the console as a placeholder for the future row-rendering
+       *      step — no row is inserted into #resultsBody yet, and none of
+       *      this path runs today since NullDataProvider always rejects.
+       *   4. If it rejects (today, always) or any required module failed
+       *      to load, the empty state is kept/restored and nothing is
+       *      fabricated — the catch block never invents a row.
+       */
+      async function runScreenerSearch() {
+        readFilters();
+        renderEmptyState();
+
+        const selected = getSelectedEngine(state.strategy);
+        if (!selected || typeof selected.engine === 'undefined') {
+          console.warn(
+            '[Stock Badshah] "' + state.strategy + '" strategy selected, but its engine ' +
+            'script does not appear to be loaded — check the <script> tags at the top of screener.html.'
+          );
+          return;
+        }
+        console.log('[Stock Badshah] Strategy selected: ' + selected.label + ' (state.strategy = "' + selected.key + '")');
+
+        if (!state.symbol) {
+          // Card/pill selection only — nothing searched yet, so there is
+          // nothing to fetch. Stay on the empty state.
+          return;
+        }
+
+        if (!window.MarketDataService || typeof window.MarketDataService.fetchSnapshot !== 'function') {
+          console.warn('[Stock Badshah] MarketDataService is not available — check its <script> tag.');
+          return;
+        }
+
+        try {
+          const snapshot = await window.MarketDataService.fetchSnapshot(state.symbol);
+
+          // Only reachable once a real DataProvider is registered in
+          // market-data-service.js — NullDataProvider always throws
+          // before this point today.
+          if (!window.IndicatorMath || typeof window.IndicatorMath.calculateAllIndicators !== 'function') {
+            console.warn('[Stock Badshah] IndicatorMath is not available — check its <script> tag.');
+            return;
+          }
+          if (typeof selected.toInput !== 'function') {
+            console.warn('[Stock Badshah] No MarketDataService adapter available for "' + selected.key + '".');
+            return;
+          }
+          if (typeof selected.engine.analyzeStock !== 'function') {
+            console.warn('[Stock Badshah] "' + selected.label + '" has no analyzeStock() method.');
+            return;
+          }
+
+          const indicators = window.IndicatorMath.calculateAllIndicators(snapshot.dailyBars || []);
+          const input = selected.toInput(snapshot, indicators);
+          const result = selected.engine.analyzeStock(input);
+
+          // TODO (future drop): build a row from `result` and append it to
+          // #resultsBody, then set resultsTableWrap.hidden = false /
+          // resultsEmptyState.hidden = true. Not done here — no real
+          // snapshot has ever reached this line yet.
+          console.log('[Stock Badshah] ' + selected.label + ' result for ' + state.symbol + ':', result);
+        } catch (err) {
+          // Expected path today: NullDataProvider rejects every call with
+          // "no provider configured". Any other unexpected error (bad
+          // symbol, malformed data, a missing module) lands here too —
+          // either way, the UI never crashes and never shows a fabricated
+          // row; it just stays on the honest empty state.
+          console.info('[Stock Badshah] Market data not connected yet — ' + (err && err.message ? err.message : err));
+          renderEmptyState();
+        }
+      }
+    })();
+  </script>
+
+</body>
+</html>

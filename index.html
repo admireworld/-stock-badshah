@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dashboard — Stock Badshah</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<!-- Firebase (Authentication only) -->
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-app-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.1/firebase-auth-compat.js" crossorigin="anonymous"></script>
+<script src="firebase-config.js"></script>
+
+<!--
+  ============================================================================
+  STATUS: Design/structure only, same as every other file in this drop.
+
+  - NO paid market-data API is connected here or anywhere in this project.
+  - NO stock price, index level, score, signal, entry, stop-loss, target,
+    R:R, or holding period on this page is real, sample, or hardcoded.
+    Every one of those slots renders an explicit "Data not connected" /
+    "Market data not connected" empty state instead.
+  - This file does NOT modify login.html, firebase-config.js,
+    week-strategy-engine.js, month-strategy-engine.js,
+    positional-strategy-engine.js, indicator-math.js, or
+    market-data-service.js. It only *references* them (script tags +
+    commented wiring notes) so the next drop can connect real data without
+    touching this page's structure.
+  - Auth guard below uses the exact same window.firebaseReady /
+    onAuthStateChanged pattern already used in login.html.
+  ============================================================================
+-->
+
+<!-- Future wiring (not called anywhere in this file yet):
+       market-data-service.js  -> MarketDataService.fetchSnapshot(symbol)
+       week-strategy-engine.js -> WeekStrategyEngine.analyzeStock(input)
+       month-strategy-engine.js-> MonthStrategyEngine.analyzeStock(input)
+       positional-strategy-engine.js -> PositionalStrategyEngine.analyzeStock(input)
+     Included here as plain <script> tags so they're available on window
+     once wiring happens, but nothing on this page invokes them yet. -->
+<script src="market-data-service.js"></script>
+<!-- Browser-safe provider that talks to OUR deployed proxy (not Yahoo directly —
+     avoids the browser CORS block, see providers/browser-data-provider.js) and
+     market-data-config.js, which registers it if a real proxy URL is configured.
+     Until that URL is set, MarketDataService keeps using its safe NullDataProvider
+     default — nothing below silently switches to fake data. -->
+<script src="providers/browser-data-provider.js"></script>
+<script src="market-data-config.js"></script>
+<script src="week-strategy-engine.js"></script>
+<script src="month-strategy-engine.js"></script>
+<script src="positional-strategy-engine.js"></script>
+
+<style>
+  :root{
+    --bg: #0A0F1C;
+    --surface: #111A2C;
+    --surface-2: #16213A;
+    --border: #223252;
+    --gold: #D4A94A;
+    --gold-soft: rgba(212,169,74,0.14);
+    --text: #F3EFE6;
+    --text-muted: #8C96AE;
+    --up: #3FAE6A;
+    --danger: #E0645A;
+  }
+
+  *{ margin:0; padding:0; box-sizing:border-box; }
+
+  html,body{
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body{
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background-image:
+      radial-gradient(circle at 15% 0%, rgba(212,169,74,0.07), transparent 45%),
+      radial-gradient(circle at 100% 20%, rgba(212,169,74,0.05), transparent 40%);
+  }
+
+  a{ color: inherit; text-decoration: none; }
+  ul{ list-style: none; }
+
+  /* ---------- HEADER ---------- */
+  header{
+    border-bottom: 1px solid var(--border);
+    background: rgba(10,15,28,0.85);
+    backdrop-filter: blur(8px);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .header-inner{
+    max-width: 1280px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 28px;
+    gap: 16px;
+  }
+
+  .brand{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .crown-mark{
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
+  }
+
+  .brand-text{
+    display: flex;
+    flex-direction: column;
+    line-height: 1;
+  }
+
+  .brand-name{
+    font-family: 'Playfair Display', serif;
+    font-weight: 800;
+    font-size: 22px;
+    letter-spacing: 0.3px;
+    color: var(--text);
+  }
+
+  .brand-name span{ color: var(--gold); }
+
+  .brand-tag{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+
+  .user-box{
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .user-avatar{
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: var(--gold-soft);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--gold);
+    flex-shrink: 0;
+  }
+
+  .user-info{
+    display: flex;
+    flex-direction: column;
+    line-height: 1.3;
+  }
+
+  .user-email{
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .user-role{
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .logout-btn{
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 7px;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: 'Inter', sans-serif;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .logout-btn:hover{
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+
+  /* ---------- LAYOUT ---------- */
+  .layout{
+    flex: 1;
+    max-width: 1280px;
+    width: 100%;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 24px;
+    padding: 24px 28px 48px;
+  }
+
+  /* ---------- SIDEBAR NAV ---------- */
+  .sidebar{
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .sidebar-title{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 0 12px;
+    margin-bottom: 8px;
+  }
+
+  .nav-link{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .nav-link:hover{
+    background: var(--surface);
+    color: var(--text);
+    border-color: var(--border);
+  }
+
+  .nav-link.active{
+    background: var(--gold-soft);
+    color: var(--gold);
+    border-color: rgba(212,169,74,0.35);
+  }
+
+  .nav-link svg{ width: 16px; height: 16px; flex-shrink: 0; }
+
+  .nav-divider{
+    height: 1px;
+    background: var(--border);
+    margin: 12px 4px;
+  }
+
+  .nav-link.danger{ color: var(--danger); }
+  .nav-link.danger:hover{ background: rgba(224,101,90,0.1); border-color: rgba(224,101,90,0.3); }
+
+  /* ---------- MAIN ---------- */
+  main{
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    min-width: 0;
+  }
+
+  .page-heading{
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .page-title{
+    font-family: 'Playfair Display', serif;
+    font-weight: 700;
+    font-size: 24px;
+  }
+
+  .page-title em{ font-style: normal; color: var(--gold); }
+
+  .page-sub{
+    font-size: 12.5px;
+    color: var(--text-muted);
+  }
+
+  section.panel{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .panel-head{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .panel-head-left{ display: flex; align-items: center; gap: 10px; }
+
+  .panel-title{
+    font-family: 'Playfair Display', serif;
+    font-weight: 700;
+    font-size: 17px;
+  }
+
+  .panel-title-icon{ width: 18px; height: 18px; color: var(--gold); flex-shrink: 0; }
+
+  .badge{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+
+  .badge.status-unknown{ color: var(--text-muted); border-color: var(--border); }
+  .badge.status-closed{ color: var(--danger); border-color: rgba(224,101,90,0.35); background: rgba(224,101,90,0.08); }
+  .badge.status-open{ color: var(--up); border-color: rgba(63,174,106,0.35); background: rgba(63,174,106,0.08); }
+
+  /* ---------- MARKET OVERVIEW CARDS ---------- */
+  .overview-grid{
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+  }
+
+  .overview-card{
+    background: var(--surface);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .overview-label{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  .overview-value{
+    font-family: 'Playfair Display', serif;
+    font-weight: 700;
+    font-size: 22px;
+    color: var(--text-muted);
+  }
+
+  .overview-value.na{
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-muted);
+    font-family: 'Inter', sans-serif;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .overview-value.na svg{ width: 14px; height: 14px; opacity: 0.7; }
+
+  .overview-foot{
+    font-size: 11.5px;
+    color: var(--text-muted);
+  }
+
+  /* ---------- STRATEGY TABLES ---------- */
+  .table-wrap{ overflow-x: auto; }
+
+  table.strategy-table{
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 760px;
+  }
+
+  table.strategy-table thead th{
+    text-align: left;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  table.strategy-table tbody td{
+    padding: 14px 16px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  /* ---------- EMPTY STATE ---------- */
+  .empty-state{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 10px;
+    padding: 44px 24px;
+    color: var(--text-muted);
+  }
+
+  .empty-state svg{
+    width: 40px;
+    height: 40px;
+    color: var(--gold);
+    opacity: 0.55;
+  }
+
+  .empty-state-title{
+    font-family: 'Playfair Display', serif;
+    font-weight: 700;
+    font-size: 16px;
+    color: var(--text);
+  }
+
+  .empty-state-sub{
+    font-size: 12.5px;
+    max-width: 440px;
+    line-height: 1.6;
+  }
+
+  .empty-state-cols{
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .empty-state-cols span{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 3px 9px;
+  }
+
+  /* ---------- QUICK NAV GRID (mobile-friendly duplicate of sidebar) ---------- */
+  .quicknav-grid{
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    padding: 20px;
+  }
+
+  .quicknav-item{
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-2);
+    transition: border-color 0.15s ease, transform 0.05s ease;
+  }
+
+  .quicknav-item:hover{ border-color: var(--gold); }
+  .quicknav-item:active{ transform: translateY(1px); }
+
+  .quicknav-item svg{ width: 20px; height: 20px; color: var(--gold); }
+
+  .quicknav-item-title{ font-size: 13.5px; font-weight: 600; }
+  .quicknav-item-sub{ font-size: 11px; color: var(--text-muted); }
+
+  /* ---------- FOOTER ---------- */
+  footer{
+    border-top: 1px solid var(--border);
+    padding: 22px 28px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  footer span{ color: var(--gold); }
+
+  /* ---------- MOBILE ---------- */
+  @media (max-width: 880px){
+    .layout{
+      grid-template-columns: 1fr;
+      padding: 18px 16px 40px;
+    }
+    .sidebar{
+      flex-direction: row;
+      overflow-x: auto;
+      gap: 8px;
+      padding-bottom: 4px;
+    }
+    .sidebar-title{ display: none; }
+    .nav-link{ white-space: nowrap; }
+    .nav-divider{ display: none; }
+    .overview-grid{ grid-template-columns: 1fr; }
+    .quicknav-grid{ grid-template-columns: repeat(2, 1fr); }
+  }
+
+  @media (max-width: 460px){
+    .header-inner{ padding: 14px 16px; }
+    .user-email{ max-width: 110px; }
+    .quicknav-grid{ grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <svg class="crown-mark" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 34 L6 16 L15 24 L24 10 L33 24 L42 16 L40 34 Z" stroke="#D4A94A" stroke-width="2.2" stroke-linejoin="round" fill="rgba(212,169,74,0.08)"/>
+          <circle cx="24" cy="10" r="2" fill="#D4A94A"/>
+          <circle cx="6" cy="16" r="2" fill="#D4A94A"/>
+          <circle cx="42" cy="16" r="2" fill="#D4A94A"/>
+          <line x1="8" y1="38" x2="40" y2="38" stroke="#D4A94A" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <div class="brand-text">
+          <div class="brand-name">Stock <span>Badshah</span></div>
+          <div class="brand-tag">Market Intelligence</div>
+        </div>
+      </div>
+
+      <div class="user-box">
+        <div class="user-info">
+          <div class="user-email" id="userEmail">Loading…</div>
+          <div class="user-role">Dashboard</div>
+        </div>
+        <div class="user-avatar" id="userAvatar">?</div>
+        <button class="logout-btn" id="logoutBtn">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <!-- ============ SIDEBAR / QUICK NAVIGATION ============ -->
+    <nav class="sidebar" aria-label="Quick navigation">
+      <div class="sidebar-title">Navigate</div>
+
+      <a class="nav-link active" href="index.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        Dashboard
+      </a>
+      <a class="nav-link" href="screener.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Stock Screener
+      </a>
+      <a class="nav-link" href="intraday-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h7l-1 8 11-14h-7z"/></svg>
+        Intraday Strategy
+      </a>
+      <a class="nav-link" href="week-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
+        1 Week Strategy
+      </a>
+      <a class="nav-link" href="month-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>
+        1 Month Strategy
+      </a>
+      <a class="nav-link" href="positional-strategy.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15l3-4 3 3 5-7"/></svg>
+        3–6 Month Strategy
+      </a>
+      <a class="nav-link" href="watchlist.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.9 6.26L21 9.27l-4.5 4.38L17.8 21 12 17.77 6.2 21l1.3-7.35L3 9.27l6.1-1.01z"/></svg>
+        Watchlist
+      </a>
+      <a class="nav-link" href="settings.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        Settings
+      </a>
+
+      <div class="nav-divider"></div>
+
+      <a class="nav-link danger" href="#" id="sidebarLogout">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Logout
+      </a>
+    </nav>
+
+    <!-- ============ MAIN CONTENT ============ -->
+    <main>
+
+      <div class="page-heading">
+        <div>
+          <div class="page-title">Welcome back, <em id="pageWelcomeName">Badshah</em></div>
+          <div class="page-sub">Your research &amp; decision-support overview — not investment advice.</div>
+        </div>
+      </div>
+
+      <!-- ===================== 1. MARKET OVERVIEW ===================== -->
+      <section class="panel" id="marketOverview">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>
+            <div class="panel-title">Market Overview</div>
+          </div>
+          <span class="badge status-unknown" id="marketStatusBadge">Status: Data not connected</span>
+        </div>
+
+        <div class="overview-grid">
+          <div class="overview-card">
+            <div class="overview-label">
+              NIFTY 50
+              <span class="badge status-unknown">N/A</span>
+            </div>
+            <div class="overview-value na">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              Data not connected
+            </div>
+            <div class="overview-foot">No market-data provider is registered yet (see market-data-service.js).</div>
+          </div>
+
+          <div class="overview-card">
+            <div class="overview-label">
+              BANK NIFTY
+              <span class="badge status-unknown">N/A</span>
+            </div>
+            <div class="overview-value na">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              Data not connected
+            </div>
+            <div class="overview-foot">No market-data provider is registered yet (see market-data-service.js).</div>
+          </div>
+
+          <div class="overview-card">
+            <div class="overview-label">
+              Market Status
+              <span class="badge status-unknown">N/A</span>
+            </div>
+            <div class="overview-value na">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              Unknown — no feed
+            </div>
+            <div class="overview-foot">Open/closed state requires a live or exchange-calendar source, not yet wired in.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== 2. STRATEGY SECTIONS ===================== -->
+
+      <!-- 2.1 — 1 Week / Short Term -->
+      <section class="panel" id="weekStrategyPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
+            <div class="panel-title">1 Week — Short Term</div>
+          </div>
+          <span class="badge status-unknown">Top Candidates: 0</span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="strategy-table" aria-describedby="weekEmptyState">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Score</th>
+                <th>Signal</th>
+                <th>Entry</th>
+                <th>Stop Loss</th>
+                <th>Target</th>
+                <th>Risk / Reward</th>
+                <th>Holding Period</th>
+              </tr>
+            </thead>
+            <tbody><!-- Populated by WeekStrategyEngine.analyzeStock() results once market-data-service.js has a real provider. Intentionally empty in this drop. --></tbody>
+          </table>
+        </div>
+
+        <div class="empty-state" id="weekEmptyState">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          <div class="empty-state-title">Market data not connected</div>
+          <div class="empty-state-sub">1-Week candidates will appear here once a real market-data provider is registered and week-strategy-engine.js is wired into the Screener flow.</div>
+          <div class="empty-state-cols">
+            <span>Score</span><span>Signal</span><span>Entry</span><span>Stop Loss</span><span>Target</span><span>R:R</span><span>Holding Period</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2.2 — 1 Month / Swing -->
+      <section class="panel" id="monthStrategyPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>
+            <div class="panel-title">1 Month — Swing</div>
+          </div>
+          <span class="badge status-unknown">Top Candidates: 0</span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="strategy-table" aria-describedby="monthEmptyState">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Score</th>
+                <th>Signal</th>
+                <th>Entry</th>
+                <th>Stop Loss</th>
+                <th>Target</th>
+                <th>Risk / Reward</th>
+                <th>Holding Period</th>
+              </tr>
+            </thead>
+            <tbody><!-- Populated by MonthStrategyEngine.analyzeStock() results once market-data-service.js has a real provider. Intentionally empty in this drop. --></tbody>
+          </table>
+        </div>
+
+        <div class="empty-state" id="monthEmptyState">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          <div class="empty-state-title">Market data not connected</div>
+          <div class="empty-state-sub">1-Month swing candidates will appear here once a real market-data provider is registered and month-strategy-engine.js is wired into the Screener flow.</div>
+          <div class="empty-state-cols">
+            <span>Score</span><span>Signal</span><span>Entry</span><span>Stop Loss</span><span>Target</span><span>R:R</span><span>Holding Period</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2.3 — 3–6 Months / Positional -->
+      <section class="panel" id="positionalStrategyPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15l3-4 3 3 5-7"/></svg>
+            <div class="panel-title">3–6 Months — Positional</div>
+          </div>
+          <span class="badge status-unknown">Top Candidates: 0</span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="strategy-table" aria-describedby="positionalEmptyState">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Score</th>
+                <th>Signal</th>
+                <th>Entry</th>
+                <th>Stop Loss</th>
+                <th>Target</th>
+                <th>Risk / Reward</th>
+                <th>Holding Period</th>
+              </tr>
+            </thead>
+            <tbody><!-- Populated by PositionalStrategyEngine.analyzeStock() results once market-data-service.js has a real provider AND a toPositionalStrategyInput() adapter exists. Intentionally empty in this drop. --></tbody>
+          </table>
+        </div>
+
+        <div class="empty-state" id="positionalEmptyState">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+          <div class="empty-state-title">Market data not connected</div>
+          <div class="empty-state-sub">3–6 month positional candidates will appear here once a real market-data provider is registered and positional-strategy-engine.js is wired into the Screener flow.</div>
+          <div class="empty-state-cols">
+            <span>Score</span><span>Signal</span><span>Entry</span><span>Stop Loss</span><span>Target</span><span>R:R</span><span>Holding Period</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================== 3. QUICK NAVIGATION (grid, mirrors sidebar) ===================== -->
+      <section class="panel" id="quickNavPanel">
+        <div class="panel-head">
+          <div class="panel-head-left">
+            <svg class="panel-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+            <div class="panel-title">Quick Navigation</div>
+          </div>
+        </div>
+
+        <div class="quicknav-grid">
+          <a class="quicknav-item" href="screener.html">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <div class="quicknav-item-title">Stock Screener</div>
+            <div class="quicknav-item-sub">Search &amp; analyze any symbol</div>
+          </a>
+          <a class="quicknav-item" href="week-strategy.html">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
+            <div class="quicknav-item-title">1 Week Strategy</div>
+            <div class="quicknav-item-sub">Short-term momentum</div>
+          </a>
+          <a class="quicknav-item" href="month-strategy.html">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg>
+            <div class="quicknav-item-title">1 Month Strategy</div>
+            <div class="quicknav-item-sub">Swing trade setups</div>
+          </a>
+          <a class="quicknav-item" href="positional-strategy.html">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 15l3-4 3 3 5-7"/></svg>
+            <div class="quicknav-item-title">3–6 Month Strategy</div>
+            <div class="quicknav-item-sub">Positional quality picks</div>
+          </a>
+          <a class="quicknav-item" href="watchlist.html">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l2.9 6.26L21 9.27l-4.5 4.38L17.8 21 12 17.77 6.2 21l1.3-7.35L3 9.27l6.1-1.01z"/></svg>
+            <div class="quicknav-item-title">Watchlist</div>
+            <div class="quicknav-item-sub">Symbols you're tracking</div>
+          </a>
+          <a class="quicknav-item" href="settings.html">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82"/></svg>
+            <div class="quicknav-item-title">Settings</div>
+            <div class="quicknav-item-sub">Account &amp; preferences</div>
+          </a>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer>
+    &copy; 2026 <span>Stock Badshah</span>. All rights reserved. Research &amp; decision-support only — not investment advice. No output on this page implies guaranteed profit, return, accuracy, or target achievement.
+  </footer>
+
+  <script>
+    // ==========================================================================
+    // Auth guard — identical pattern to login.html: if Firebase isn't
+    // configured, or the user isn't logged in, this page does not pretend
+    // to be a working dashboard behind a wall; it sends the user to login.html.
+    // ==========================================================================
+    (function () {
+      const userEmailEl = document.getElementById('userEmail');
+      const userAvatarEl = document.getElementById('userAvatar');
+      const pageWelcomeName = document.getElementById('pageWelcomeName');
+      const logoutBtn = document.getElementById('logoutBtn');
+      const sidebarLogout = document.getElementById('sidebarLogout');
+
+      if (!window.firebaseReady) {
+        // Same as login.html: firebase-config.js still has placeholder
+        // values, or init failed. Don't fake a logged-in dashboard.
+        window.location.href = 'login.html';
+        return;
+      }
+
+      auth.onAuthStateChanged(function (user) {
+        if (!user) {
+          window.location.href = 'login.html';
+          return;
+        }
+
+        const email = user.email || 'Account';
+        userEmailEl.textContent = email;
+        userAvatarEl.textContent = email.charAt(0).toUpperCase();
+        pageWelcomeName.textContent = email.split('@')[0];
+      });
+
+      function doLogout(e) {
+        if (e) e.preventDefault();
+        auth.signOut().then(function () {
+          window.location.href = 'login.html';
+        }).catch(function (err) {
+          console.error('[Stock Badshah] Sign-out failed:', err.message);
+        });
+      }
+
+      logoutBtn.addEventListener('click', doLogout);
+      sidebarLogout.addEventListener('click', doLogout);
+    })();
+
+    // ==========================================================================
+    // NOTE — intentionally does nothing yet:
+    // No call to MarketDataService.fetchSnapshot(), WeekStrategyEngine.
+    // analyzeStock(), MonthStrategyEngine.analyzeStock(), or
+    // PositionalStrategyEngine.analyzeStock() is made from this page. All
+    // three strategy tables and the market overview cards stay in their
+    // empty/"Data not connected" state until a real DataProvider is
+    // registered with MarketDataService (see DATA-INTEGRATION-DESIGN.md §7)
+    // and this file is updated in a future drop to call fetchSnapshot() per
+    // symbol, run indicator-math.js, adapt via toWeekStrategyInput()/
+    // toMonthStrategyInput()/a future toPositionalStrategyInput(), and
+    // render real rows into the <tbody> elements above.
+    // ==========================================================================
+  </script>
+
+</body>
+</html>
